@@ -37,18 +37,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ------------------------------------------------------------
-      # 1. Checkout repository
-      # ------------------------------------------------------------
+      # ============================================================
+      # 1. CHECKOUT
+      # ============================================================
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ------------------------------------------------------------
-      # 2. Display request
-      # ------------------------------------------------------------
+      # ============================================================
+      # 2. DISPLAY REQUEST
+      # ============================================================
 
       - name: Display deployment request
         shell: bash
@@ -62,9 +62,9 @@ jobs:
           echo "Release: ${{ inputs.release }}"
           echo "================================"
 
-      # ------------------------------------------------------------
-      # 3. Validate basic inputs
-      # ------------------------------------------------------------
+      # ============================================================
+      # 3. VALIDATE INPUTS
+      # ============================================================
 
       - name: Validate inputs
         shell: bash
@@ -85,15 +85,15 @@ jobs:
 
           if [[ ! "$RELEASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Invalid release version: $RELEASE"
-            echo "Expected format similar to 26.2.3"
+            echo "Expected format: 26.2.3"
             exit 1
           fi
 
           echo "Input validation successful."
 
-      # ------------------------------------------------------------
-      # 4. Find client configuration
-      # ------------------------------------------------------------
+      # ============================================================
+      # 4. RESOLVE CLIENT CONFIG
+      # ============================================================
 
       - name: Resolve client configuration
         id: config
@@ -110,8 +110,13 @@ jobs:
             echo "::error::Client configuration not found: $CONFIG_FILE"
 
             echo ""
-            echo "Available files:"
-            find platform-client/clients -maxdepth 3 -type f 2>/dev/null | sort || true
+            echo "Available client configuration files:"
+
+            find platform-client/clients \
+              -maxdepth 3 \
+              -type f \
+              -name "config.yml" \
+              2>/dev/null | sort || true
 
             exit 1
           fi
@@ -122,17 +127,9 @@ jobs:
 
           echo "config_file=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
 
-      # ------------------------------------------------------------
-      # 5. Read target and current release
-      #
-      # Supports:
-      #
-      # uat-preview:
-      #
-      # AND:
-      #
-      # uat-preview: &uat
-      # ------------------------------------------------------------
+      # ============================================================
+      # 5. READ EXACT TARGET
+      # ============================================================
 
       - name: Read deployment target
         id: target
@@ -166,18 +163,15 @@ jobs:
           );
 
           /*
-           * Match:
+           * Supports:
            *
            * uat-preview:
-           *
-           * OR
-           *
            * uat-preview: &uat
+           * uat-stable:
+           * production-a: &production
+           * production-b:
            *
-           * But DO NOT match:
-           *
-           * something-uat-preview:
-           * uat-preview-other:
+           * Exact target names only.
            */
           const targetPattern = new RegExp(
             `^${escapedTarget}:\\s*(?:&[A-Za-z0-9_-]+)?\\s*$`
@@ -185,29 +179,22 @@ jobs:
 
           for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
-            const trimmedLine = line.trim();
 
-            if (!targetPattern.test(trimmedLine)) {
+            if (!targetPattern.test(line.trim())) {
               continue;
             }
 
             targetFound = true;
 
             console.log("");
-            console.log(`Found target: ${trimmedLine}`);
+            console.log(`Found target: ${line.trim()}`);
 
             const targetIndent =
               line.length - line.trimStart().length;
 
-            /*
-             * Search only inside this target block.
-             */
             for (let j = i + 1; j < lines.length; j++) {
               const nextLine = lines[j];
 
-              /*
-               * Ignore blank lines.
-               */
               if (!nextLine.trim()) {
                 continue;
               }
@@ -216,8 +203,8 @@ jobs:
                 nextLine.length - nextLine.trimStart().length;
 
               /*
-               * If we return to the same or lower indentation,
-               * we've reached the next YAML section.
+               * Stop when another YAML section begins
+               * at the same or lower indentation.
                */
               if (
                 nextIndent <= targetIndent &&
@@ -226,9 +213,6 @@ jobs:
                 break;
               }
 
-              /*
-               * Find continuous_deploy_tag.
-               */
               const tagMatch = nextLine.match(
                 /^\s*continuous_deploy_tag:\s*([^\s#]+)/
               );
@@ -248,15 +232,17 @@ jobs:
             );
 
             console.error("");
-            console.error("Available top-level targets:");
+            console.error("Possible YAML sections:");
 
             for (const line of lines) {
+              const trimmed = line.trim();
+
               if (
                 /^[A-Za-z0-9_-]+:\s*(?:&[A-Za-z0-9_-]+)?\s*$/.test(
-                  line.trim()
+                  trimmed
                 )
               ) {
-                console.error(` - ${line.trim()}`);
+                console.error(` - ${trimmed}`);
               }
             }
 
@@ -265,8 +251,9 @@ jobs:
 
           if (!currentRelease) {
             console.error(
-              `ERROR: continuous_deploy_tag was not found under '${target}'`
+              `ERROR: continuous_deploy_tag was not found under '${target}'.`
             );
+
             process.exit(1);
           }
 
@@ -285,9 +272,9 @@ jobs:
           );
           NODE
 
-      # ------------------------------------------------------------
-      # 6. Validate requested release differs from current
-      # ------------------------------------------------------------
+      # ============================================================
+      # 6. VALIDATE REQUESTED RELEASE
+      # ============================================================
 
       - name: Validate requested release
         shell: bash
@@ -306,28 +293,36 @@ jobs:
           echo ""
           echo "Release change required."
 
-      # ------------------------------------------------------------
-      # 7. Check whether ticket branch already exists
-      # ------------------------------------------------------------
+      # ============================================================
+      # 7. CHECK DUPLICATE BRANCH
+      # ============================================================
 
       - name: Check duplicate branch
         shell: bash
         run: |
           BRANCH="${{ inputs.ticket }}"
 
-          echo "Checking whether branch exists:"
+          echo "Checking branch:"
           echo "$BRANCH"
 
-          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+          if git ls-remote \
+            --exit-code \
+            --heads \
+            origin \
+            "$BRANCH" >/dev/null 2>&1
+          then
             echo "::error::Branch '$BRANCH' already exists."
             exit 1
           fi
 
           echo "Branch does not exist."
 
-      # ------------------------------------------------------------
-      # 8. Update ONLY continuous_deploy_tag
-      # ------------------------------------------------------------
+      # ============================================================
+      # 8. UPDATE ONLY continuous_deploy_tag
+      #
+      # IMPORTANT:
+      # Preserve the original CRLF/LF line-ending format.
+      # ============================================================
 
       - name: Update continuous deploy tag
         id: update
@@ -344,22 +339,35 @@ jobs:
           const target = process.argv[3];
           const requestedRelease = process.argv[4];
 
-          const originalContent = fs.readFileSync(file, "utf8");
+          const originalContent =
+            fs.readFileSync(file, "utf8");
 
           /*
-           * Preserve whether the original file ended with a newline.
+           * Detect original line endings.
+           *
+           * Windows:
+           * \r\n
+           *
+           * Linux:
+           * \n
            */
-          const hasFinalNewline =
+          const lineEnding =
+            originalContent.includes("\r\n")
+              ? "\r\n"
+              : "\n";
+
+          const endedWithNewline =
             originalContent.endsWith("\n");
 
-          const lines = originalContent.split(/\r?\n/);
+          const lines =
+            originalContent.split(/\r?\n/);
 
           /*
-           * split() creates an extra empty item when the file ends
-           * with a newline. Remove it and restore the newline later.
+           * split() creates a trailing empty element
+           * when the file ends with a newline.
            */
           if (
-            hasFinalNewline &&
+            endedWithNewline &&
             lines.length > 0 &&
             lines[lines.length - 1] === ""
           ) {
@@ -399,21 +407,31 @@ jobs:
               }
 
               const nextIndent =
-                nextLine.length - nextLine.trimStart().length;
+                nextLine.length -
+                nextLine.trimStart().length;
 
               if (
                 nextIndent <= targetIndent &&
-                /^[A-Za-z0-9_-]+:/.test(nextLine.trim())
+                /^[A-Za-z0-9_-]+:/.test(
+                  nextLine.trim()
+                )
               ) {
                 break;
               }
 
               /*
-               * Capture:
+               * Example:
                *
-               * 1 = indentation + key + spaces
-               * 2 = existing release
-               * 3 = anything following the release
+               *   continuous_deploy_tag: 26.3.1
+               *
+               * Group 1:
+               * spaces + continuous_deploy_tag + spacing
+               *
+               * Group 2:
+               * release
+               *
+               * Group 3:
+               * anything after release
                */
               const match = nextLine.match(
                 /^(\s*continuous_deploy_tag:\s*)([^\s#]+)(.*)$/
@@ -427,18 +445,20 @@ jobs:
 
               if (oldRelease === requestedRelease) {
                 console.error(
-                  `Release ${requestedRelease} is already configured for ${target}`
+                  `Release ${requestedRelease} is already configured for ${target}.`
                 );
+
                 process.exit(1);
               }
 
               /*
-               * Replace ONLY the release value.
+               * Replace ONLY release value.
                */
               lines[j] =
                 `${match[1]}${requestedRelease}${match[3]}`;
 
               tagFound = true;
+
               break;
             }
 
@@ -449,6 +469,7 @@ jobs:
             console.error(
               `ERROR: Target '${target}' was not found.`
             );
+
             process.exit(1);
           }
 
@@ -456,22 +477,34 @@ jobs:
             console.error(
               `ERROR: continuous_deploy_tag was not found under '${target}'.`
             );
+
             process.exit(1);
           }
 
-          let newContent = lines.join("\n");
+          /*
+           * Reconstruct using ORIGINAL line endings.
+           */
+          let newContent =
+            lines.join(lineEnding);
 
-          if (hasFinalNewline) {
-            newContent += "\n";
+          if (endedWithNewline) {
+            newContent += lineEnding;
           }
 
-          fs.writeFileSync(file, newContent);
+          fs.writeFileSync(
+            file,
+            newContent,
+            "utf8"
+          );
 
           console.log("");
-          console.log("Configuration updated.");
-          console.log(
-            `${target}: ${oldRelease} -> ${requestedRelease}`
-          );
+          console.log("================================");
+          console.log("Configuration updated");
+          console.log("================================");
+          console.log(`Target:   ${target}`);
+          console.log(`Previous: ${oldRelease}`);
+          console.log(`New:      ${requestedRelease}`);
+          console.log("================================");
 
           fs.appendFileSync(
             process.env.GITHUB_OUTPUT,
@@ -479,9 +512,17 @@ jobs:
           );
           NODE
 
-      # ------------------------------------------------------------
-      # 9. Verify exactly the expected file changed
-      # ------------------------------------------------------------
+      # ============================================================
+      # 9. VERIFY CHANGE
+      #
+      # Safety requirement:
+      #
+      # Only config.yml may change.
+      #
+      # Exactly:
+      # 1 removed line
+      # 1 added line
+      # ============================================================
 
       - name: Verify configuration change
         shell: bash
@@ -490,7 +531,7 @@ jobs:
 
           echo ""
           echo "================================"
-          echo "Git diff"
+          echo "GIT DIFF"
           echo "================================"
 
           git diff -- "$CONFIG_FILE"
@@ -510,17 +551,42 @@ jobs:
 
           if [ "$CHANGED_FILES" != "$CONFIG_FILE" ]; then
             echo "::error::Unexpected files were modified."
+            echo ""
+            echo "Expected:"
+            echo "$CONFIG_FILE"
+            echo ""
+            echo "Actual:"
+            echo "$CHANGED_FILES"
+
             exit 1
           fi
 
-          CHANGE_COUNT="$(git diff --numstat -- "$CONFIG_FILE" | awk '{print $1 + $2}')"
+          ADDED_LINES="$(
+            git diff --numstat -- "$CONFIG_FILE" |
+            awk '{print $1}'
+          )"
+
+          REMOVED_LINES="$(
+            git diff --numstat -- "$CONFIG_FILE" |
+            awk '{print $2}'
+          )"
 
           echo ""
-          echo "Changed lines:"
-          echo "$CHANGE_COUNT"
+          echo "Added lines:"
+          echo "$ADDED_LINES"
 
-          if [ "$CHANGE_COUNT" -ne 2 ]; then
-            echo "::error::Expected exactly one removed line and one added line."
+          echo ""
+          echo "Removed lines:"
+          echo "$REMOVED_LINES"
+
+          if [ "$ADDED_LINES" -ne 1 ]; then
+            echo "::error::Expected exactly 1 added line."
+            echo "Refusing to create PR."
+            exit 1
+          fi
+
+          if [ "$REMOVED_LINES" -ne 1 ]; then
+            echo "::error::Expected exactly 1 removed line."
             echo "Refusing to create PR."
             exit 1
           fi
@@ -528,9 +594,9 @@ jobs:
           echo ""
           echo "Diff validation successful."
 
-      # ------------------------------------------------------------
-      # 10. Create branch
-      # ------------------------------------------------------------
+      # ============================================================
+      # 10. CREATE BRANCH
+      # ============================================================
 
       - name: Create deployment branch
         shell: bash
@@ -542,35 +608,47 @@ jobs:
 
           git checkout -b "$BRANCH"
 
-      # ------------------------------------------------------------
-      # 11. Commit
-      # ------------------------------------------------------------
+      # ============================================================
+      # 11. COMMIT
+      # ============================================================
 
       - name: Commit configuration change
         shell: bash
         run: |
           CONFIG_FILE="${{ steps.config.outputs.config_file }}"
 
-          git config user.name "deployment-pr-bot"
-          git config user.email "deployment-pr-bot@users.noreply.github.com"
+          git config \
+            user.name \
+            "deployment-pr-bot"
+
+          git config \
+            user.email \
+            "deployment-pr-bot@users.noreply.github.com"
 
           git add "$CONFIG_FILE"
 
           git commit \
             -m "${{ inputs.ticket }}: Deploy ${{ inputs.release }} to ${{ inputs.target }} for ${{ inputs.client }}"
 
-      # ------------------------------------------------------------
-      # 12. Push branch
-      # ------------------------------------------------------------
+      # ============================================================
+      # 12. PUSH
+      # ============================================================
 
       - name: Push deployment branch
         shell: bash
         run: |
-          git push origin "${{ inputs.ticket }}"
+          BRANCH="${{ inputs.ticket }}"
 
-      # ------------------------------------------------------------
-      # 13. Create PR
-      # ------------------------------------------------------------
+          echo "Pushing branch:"
+          echo "$BRANCH"
+
+          git push \
+            origin \
+            "$BRANCH"
+
+      # ============================================================
+      # 13. CREATE PULL REQUEST
+      # ============================================================
 
       - name: Create Pull Request
         id: pr
@@ -593,25 +671,25 @@ jobs:
 
           **Release:** ${{ inputs.release }}
 
-          ## Configuration
+          ## Configuration File
 
           \`${{ steps.config.outputs.config_file }}\`
 
           ## Configuration Change
 
-          Target:
+          **Target**
 
           \`${{ inputs.target }}\`
 
-          Field:
+          **Field**
 
           \`continuous_deploy_tag\`
 
-          Previous release:
+          **Previous release**
 
           \`${{ steps.update.outputs.old_release }}\`
 
-          New release:
+          **New release**
 
           \`${{ inputs.release }}\`
 
@@ -627,9 +705,9 @@ jobs:
 
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
 
-      # ------------------------------------------------------------
-      # 14. Final result
-      # ------------------------------------------------------------
+      # ============================================================
+      # 14. SUMMARY
+      # ============================================================
 
       - name: Deployment PR summary
         shell: bash
@@ -638,29 +716,38 @@ jobs:
           echo "================================"
           echo "DEPLOYMENT PR CREATED"
           echo "================================"
+
           echo ""
           echo "Ticket:"
           echo "${{ inputs.ticket }}"
+
           echo ""
           echo "Client:"
           echo "${{ inputs.client }}"
+
           echo ""
           echo "Target:"
           echo "${{ inputs.target }}"
+
           echo ""
           echo "Configuration:"
           echo "${{ steps.config.outputs.config_file }}"
+
           echo ""
           echo "Previous release:"
           echo "${{ steps.update.outputs.old_release }}"
+
           echo ""
           echo "New release:"
           echo "${{ inputs.release }}"
+
           echo ""
           echo "Branch:"
           echo "${{ inputs.ticket }}"
+
           echo ""
           echo "Pull Request:"
           echo "${{ steps.pr.outputs.pr_url }}"
+
           echo ""
           echo "================================"
