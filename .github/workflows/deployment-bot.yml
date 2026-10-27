@@ -57,7 +57,7 @@ jobs:
         shell: bash
         run: |
           CLIENT="${{ inputs.client }}"
-          CONFIG_FILE="deployment_bot/platform-client/clients/${CLIENT}/config.yml.txt"
+          CONFIG_FILE="platform-client/clients/${CLIENT}/config.yml"
 
           echo "Looking for configuration:"
           echo "$CONFIG_FILE"
