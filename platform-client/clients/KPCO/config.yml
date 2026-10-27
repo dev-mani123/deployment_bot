@@ -1,300 +1,66 @@
-name: Deployment PR Bot
+qa-next: &qa
+  <<: *base_defaults
+  cost_result_logging: false
+  sqs_api_queue_name: QA_cs_procedure_serp
+  sqs_etl_queue_name: QA_cs_provider_match
+  continuous_deploy_tag: next
+  should_smoke_test: false
+  cloud:
+    use: true
+    scheduled_suspend_resume:
+      suspend: true
+      resume: false
+    answers_file: platform-nonprod-degraded-indexing-support.yml
+    auto_scale_util_server_maximum_capacity: 3
+    template: platform-sapphire365.json
+  ui_repo: platform-ui-2
+  api_key: *api_key
+  configuration_as_yaml: true
+  admin_host: awsbcbsksdbqa01a.aws.mdx.med
+  admin_database_password: mdxdev123
+  provider_update_email_to: UATSupport@zelis.com
+  index_source: rabbit
+  eligibility_source: *eligibility_source
+  prss_url: https://kansas-uat.prs.mdxdata.com
+  predicate_resolution: with_provider_identifier
 
-on:
-  workflow_dispatch:
-    inputs:
-      ticket:
-        description: "Deployment ticket"
-        required: true
-        type: string
 
-      client:
-        description: "Client name"
-        required: true
-        type: string
+qa-stable:
+  <<: *qa
+  cloud:
+    use: true
+    scheduled_suspend_resume:
+      suspend: true
+      resume: false
 
-      target:
-        description: "Exact deployment target"
-        required: true
-        type: choice
-        options:
-          - uat-preview
-          - uat-stable
-          - production-a
-          - production-b
 
-      release:
-        description: "Release version"
-        required: true
-        type: string
+uat-stable: &uat
+  <<: *base_defaults
+  continuous_deploy_tag: 26.3.3
+  cost_result_logging: false
+  sqs_api_queue_name: UAT_cs_procedure_serp
+  sqs_etl_queue_name: UAT_cs_provider_match
+  cloud:
 
-permissions:
-  contents: write
-  pull-requests: write
 
-jobs:
-  create-deployment-pr:
-    runs-on: ubuntu-latest
+uat-preview:
+  <<: *uat
+  continuous_deploy_tag: 26.4.1
+  cloud:
+    use: true
+    scheduled_suspend_resume:
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Validate inputs
-        shell: bash
-        run: |
-          if [[ ! "${{ inputs.ticket }}" =~ ^[A-Za-z0-9_-]+$ ]]; then
-            echo "::error::Invalid ticket: ${{ inputs.ticket }}"
-            exit 1
-          fi
+production-a: &production
+  <<: *base_defaults
+  continuous_deploy_tag: 26.2.3
+  cost_result_logging: false
+  sqs_api_queue_name: PROD_cs_procedure_serp
 
-          if [[ ! "${{ inputs.client }}" =~ ^[A-Za-z0-9_-]+$ ]]; then
-            echo "::error::Invalid client: ${{ inputs.client }}"
-            exit 1
-          fi
 
-          if [[ ! "${{ inputs.release }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Invalid release: ${{ inputs.release }}"
-            exit 1
-          fi
-
-      - name: Resolve client configuration
-        id: config
-        shell: bash
-        run: |
-          CLIENT="${{ inputs.client }}"
-          CONFIG_FILE="platform-client/clients/${CLIENT}/config.yml"
-
-          echo "Looking for:"
-          echo "$CONFIG_FILE"
-
-          if [ ! -f "$CONFIG_FILE" ]; then
-            echo "::error::Client configuration not found: $CONFIG_FILE"
-            exit 1
-          fi
-
-          echo "Configuration found."
-          echo "config_file=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
-
-      - name: Update deployment target
-        id: update
-        shell: bash
-        run: |
-          CONFIG_FILE="${{ steps.config.outputs.config_file }}"
-          TARGET="${{ inputs.target }}"
-          RELEASE="${{ inputs.release }}"
-
-          node - "$CONFIG_FILE" "$TARGET" "$RELEASE" <<'NODE'
-          const fs = require("fs");
-
-          const file = process.argv[2];
-          const target = process.argv[3];
-          const requestedRelease = process.argv[4];
-
-          const content = fs.readFileSync(file, "utf8");
-          const lines = content.split(/\r?\n/);
-
-          let targetFound = false;
-          let tagFound = false;
-          let oldRelease = null;
-
-          for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-
-            if (line.trim() !== `${target}:`) {
-              continue;
-            }
-
-            targetFound = true;
-
-            const targetIndent =
-              line.length - line.trimStart().length;
-
-            for (let j = i + 1; j < lines.length; j++) {
-              const nextLine = lines[j];
-
-              if (!nextLine.trim()) {
-                continue;
-              }
-
-              const nextIndent =
-                nextLine.length - nextLine.trimStart().length;
-
-              if (
-                nextIndent <= targetIndent &&
-                /^[A-Za-z0-9_-]+:/.test(nextLine.trim())
-              ) {
-                break;
-              }
-
-              const match = nextLine.match(
-                /^(\s*continuous_deploy_tag:\s*)([^\s#]+)(.*)$/
-              );
-
-              if (match) {
-                oldRelease = match[2];
-
-                if (oldRelease === requestedRelease) {
-                  console.error(
-                    `Release ${requestedRelease} is already configured for ${target}.`
-                  );
-                  process.exit(1);
-                }
-
-                lines[j] =
-                  `${match[1]}${requestedRelease}${match[3]}`;
-
-                tagFound = true;
-                break;
-              }
-            }
-
-            break;
-          }
-
-          if (!targetFound) {
-            console.error(
-              `Deployment target '${target}' was not found in ${file}.`
-            );
-            process.exit(1);
-          }
-
-          if (!tagFound) {
-            console.error(
-              `continuous_deploy_tag was not found under '${target}'.`
-            );
-            process.exit(1);
-          }
-
-          fs.writeFileSync(file, lines.join("\n"));
-
-          fs.appendFileSync(
-            process.env.GITHUB_OUTPUT,
-            `old_release=${oldRelease}\n`
-          );
-
-          console.log(
-            `Updated ${target}: ${oldRelease} -> ${requestedRelease}`
-          );
-          NODE
-
-      - name: Verify change
-        shell: bash
-        run: |
-          echo "================================"
-          echo "Git diff"
-          echo "================================"
-
-          git diff -- "${{ steps.config.outputs.config_file }}"
-
-          if git diff --quiet; then
-            echo "::error::No configuration change was produced."
-            exit 1
-          fi
-
-          CHANGED_FILES=$(git diff --name-only)
-
-          if [ "$CHANGED_FILES" != "${{ steps.config.outputs.config_file }}" ]; then
-            echo "::error::Unexpected files were modified."
-            echo "$CHANGED_FILES"
-            exit 1
-          fi
-
-      - name: Check branch does not already exist
-        shell: bash
-        run: |
-          BRANCH="${{ inputs.ticket }}"
-
-          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-            echo "::error::Branch '$BRANCH' already exists."
-            exit 1
-          fi
-
-      - name: Create branch and commit
-        shell: bash
-        run: |
-          BRANCH="${{ inputs.ticket }}"
-
-          git config user.name "deployment-pr-bot"
-          git config user.email "deployment-pr-bot@users.noreply.github.com"
-
-          git checkout -b "$BRANCH"
-
-          git add "${{ steps.config.outputs.config_file }}"
-
-          git commit \
-            -m "${{ inputs.ticket }}: Deploy ${{ inputs.release }} to ${{ inputs.target }} for ${{ inputs.client }}"
-
-      - name: Push branch
-        shell: bash
-        run: |
-          git push origin "${{ inputs.ticket }}"
-
-      - name: Create Pull Request
-        id: pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          PR_URL=$(gh pr create \
-            --base "${{ github.event.repository.default_branch }}" \
-            --head "${{ inputs.ticket }}" \
-            --title "${{ inputs.ticket }} - Deploy ${{ inputs.release }} to ${{ inputs.target }} for ${{ inputs.client }}" \
-            --body "$(cat <<EOF
-          ## Deployment Request
-
-          **Deployment Ticket:** ${{ inputs.ticket }}
-          **Client:** ${{ inputs.client }}
-          **Deployment Target:** ${{ inputs.target }}
-          **Release:** ${{ inputs.release }}
-
-          ### Configuration
-
-          \`${{ steps.config.outputs.config_file }}\`
-
-          ### Change
-
-          \`${{ inputs.target }} -> continuous_deploy_tag\`
-
-          **Previous release:** ${{ steps.update.outputs.old_release }}
-          **New release:** ${{ inputs.release }}
-
-          ### Branch
-
-          \`${{ inputs.ticket }}\`
-
-          ---
-          Created automatically by Deployment PR Bot.
-          EOF
-          )")
-
-          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
-
-      - name: Deployment PR summary
-        shell: bash
-        run: |
-          echo "================================"
-          echo "DEPLOYMENT PR CREATED"
-          echo "================================"
-          echo "Ticket:   ${{ inputs.ticket }}"
-          echo "Client:   ${{ inputs.client }}"
-          echo "Target:   ${{ inputs.target }}"
-          echo "Release:  ${{ inputs.release }}"
-          echo ""
-          echo "Config:"
-          echo "${{ steps.config.outputs.config_file }}"
-          echo ""
-          echo "Previous:"
-          echo "${{ steps.update.outputs.old_release }}"
-          echo ""
-          echo "New:"
-          echo "${{ inputs.release }}"
-          echo ""
-          echo "Branch:"
-          echo "${{ inputs.ticket }}"
-          echo ""
-          echo "Pull Request:"
-          echo "${{ steps.pr.outputs.pr_url }}"
-          echo "================================"
+production-b:
+  <<: *production
+  continuous_deploy_tag: 26.1.3
+  admin_host: awsbcbsksdbprd01b.aws.mdx.med
+  session_duration: 1800
+  
