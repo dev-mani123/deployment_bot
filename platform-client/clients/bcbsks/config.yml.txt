@@ -1,0 +1,66 @@
+qa-next: &qa
+  <<: *base_defaults
+  cost_result_logging: false
+  sqs_api_queue_name: QA_cs_procedure_serp
+  sqs_etl_queue_name: QA_cs_provider_match
+  continuous_deploy_tag: next
+  should_smoke_test: false
+  cloud:
+    use: true
+    scheduled_suspend_resume:
+      suspend: true
+      resume: false
+    answers_file: platform-nonprod-degraded-indexing-support.yml
+    auto_scale_util_server_maximum_capacity: 3
+    template: platform-sapphire365.json
+  ui_repo: platform-ui-2
+  api_key: *api_key
+  configuration_as_yaml: true
+  admin_host: awsbcbsksdbqa01a.aws.mdx.med
+  admin_database_password: mdxdev123
+  provider_update_email_to: UATSupport@zelis.com
+  index_source: rabbit
+  eligibility_source: *eligibility_source
+  prss_url: https://kansas-uat.prs.mdxdata.com
+  predicate_resolution: with_provider_identifier
+
+
+qa-stable:
+  <<: *qa
+  cloud:
+    use: true
+    scheduled_suspend_resume:
+      suspend: true
+      resume: false
+
+
+uat-stable: &uat
+  <<: *base_defaults
+  continuous_deploy_tag: 26.3.3
+  cost_result_logging: false
+  sqs_api_queue_name: UAT_cs_procedure_serp
+  sqs_etl_queue_name: UAT_cs_provider_match
+  cloud:
+
+
+uat-preview:
+  <<: *uat
+  continuous_deploy_tag: 26.4.1
+  cloud:
+    use: true
+    scheduled_suspend_resume:
+
+
+production-a: &production
+  <<: *base_defaults
+  continuous_deploy_tag: 26.2.3
+  cost_result_logging: false
+  sqs_api_queue_name: PROD_cs_procedure_serp
+
+
+production-b:
+  <<: *production
+  continuous_deploy_tag: 26.1.3
+  admin_host: awsbcbsksdbprd01b.aws.mdx.med
+  session_duration: 1800
+  
