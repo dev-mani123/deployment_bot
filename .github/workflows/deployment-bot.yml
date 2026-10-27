@@ -46,3 +46,101 @@ jobs:
           echo "Target:  ${{ inputs.target }}"
           echo "Release: ${{ inputs.release }}"
           echo "================================"
+
+      - name: Resolve client configuration
+        id: config
+        shell: bash
+        run: |
+          CLIENT=$(echo "${{ inputs.client }}" | tr '[:upper:]' '[:lower:]')
+          CONFIG_FILE="clients/${CLIENT}/config.yml"
+
+          echo "Looking for configuration:"
+          echo "$CONFIG_FILE"
+
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "::error::Client configuration not found: $CONFIG_FILE"
+            exit 1
+          fi
+
+          echo "Configuration found."
+          echo "config_file=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Read deployment target
+        id: target
+        shell: bash
+        run: |
+          CONFIG_FILE="${{ steps.config.outputs.config_file }}"
+          TARGET="${{ inputs.target }}"
+
+          node - "$CONFIG_FILE" "$TARGET" <<'NODE'
+          const fs = require("fs");
+
+          const file = process.argv[2];
+          const target = process.argv[3];
+
+          const content = fs.readFileSync(file, "utf8");
+
+          const escapedTarget = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+          const sectionRegex = new RegExp(
+            "^" + escapedTarget + ":\\s*\\n([\\s\\S]*?)(?=^[A-Za-z0-9_-]+:\\s*(?:&[^\\n]+)?\\s*$|\\Z)",
+            "m"
+          );
+
+          const sectionMatch = content.match(sectionRegex);
+
+          if (!sectionMatch) {
+            console.error(`Target '${target}' was not found.`);
+            process.exit(1);
+          }
+
+          const section = sectionMatch[1];
+
+          const tagMatch = section.match(
+            /^\\s+continuous_deploy_tag:\\s*([^\\s#]+).*$/m
+          );
+
+          if (!tagMatch) {
+            console.error(
+              `continuous_deploy_tag was not found under '${target}'.`
+            );
+            process.exit(1);
+          }
+
+          const current = tagMatch[1];
+
+          console.log("================================");
+          console.log("Configuration validated");
+          console.log("================================");
+          console.log(`File:           ${file}`);
+          console.log(`Target:         ${target}`);
+          console.log(`Current release: ${current}`);
+          console.log("================================");
+
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `current_release=${current}\n`
+          );
+          NODE
+
+      - name: Show deployment plan
+        run: |
+          echo "================================"
+          echo "DEPLOYMENT PLAN"
+          echo "================================"
+          echo "Ticket:    ${{ inputs.ticket }}"
+          echo "Client:    ${{ inputs.client }}"
+          echo "Target:    ${{ inputs.target }}"
+          echo ""
+          echo "Config:"
+          echo "${{ steps.config.outputs.config_file }}"
+          echo ""
+          echo "Current:"
+          echo "${{ steps.target.outputs.current_release }}"
+          echo ""
+          echo "Requested:"
+          echo "${{ inputs.release }}"
+          echo ""
+          echo "Planned change:"
+          echo "continuous_deploy_tag: ${{ steps.target.outputs.current_release }} -> ${{ inputs.release }}"
+          echo "================================"
