@@ -9,19 +9,14 @@ on:
         type: string
 
       client:
-        description: "Client name"
+        description: "Client name (case-insensitive)"
         required: true
         type: string
 
       target:
-        description: "Exact deployment target"
+        description: "Deployment target (case-insensitive)"
         required: true
-        type: choice
-        options:
-          - uat-preview
-          - uat-stable
-          - production-a
-          - production-b
+        type: string
 
       release:
         description: "Release version"
@@ -37,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       # ============================================================
       # 1. CHECKOUT
       # ============================================================
@@ -47,7 +43,83 @@ jobs:
           fetch-depth: 0
 
       # ============================================================
-      # 2. DISPLAY REQUEST
+      # 2. NORMALIZE AND VALIDATE INPUTS
+      # ============================================================
+
+      - name: Normalize and validate inputs
+        id: inputs
+        shell: bash
+        env:
+          INPUT_TICKET: ${{ inputs.ticket }}
+          INPUT_CLIENT: ${{ inputs.client }}
+          INPUT_TARGET: ${{ inputs.target }}
+          INPUT_RELEASE: ${{ inputs.release }}
+        run: |
+          TICKET="$(printf '%s' "$INPUT_TICKET" | xargs)"
+          CLIENT="$(printf '%s' "$INPUT_CLIENT" | xargs)"
+          TARGET="$(printf '%s' "$INPUT_TARGET" | xargs)"
+          RELEASE="$(printf '%s' "$INPUT_RELEASE" | xargs)"
+
+          if [ -z "$TICKET" ]; then
+            echo "::error::Ticket cannot be empty."
+            exit 1
+          fi
+
+          if [ -z "$CLIENT" ]; then
+            echo "::error::Client cannot be empty."
+            exit 1
+          fi
+
+          if [ -z "$TARGET" ]; then
+            echo "::error::Deployment target cannot be empty."
+            exit 1
+          fi
+
+          if [ -z "$RELEASE" ]; then
+            echo "::error::Release cannot be empty."
+            exit 1
+          fi
+
+          if [[ ! "$TICKET" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Invalid ticket/branch name: $TICKET"
+            exit 1
+          fi
+
+          if [[ ! "$CLIENT" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Invalid client name: $CLIENT"
+            exit 1
+          fi
+
+          if [[ ! "$TARGET" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Invalid deployment target: $TARGET"
+            exit 1
+          fi
+
+          if [[ ! "$RELEASE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Invalid release: $RELEASE"
+            exit 1
+          fi
+
+          # Lowercase values used only for comparisons.
+          TICKET_LOWER="$(printf '%s' "$TICKET" | tr '[:upper:]' '[:lower:]')"
+          CLIENT_LOWER="$(printf '%s' "$CLIENT" | tr '[:upper:]' '[:lower:]')"
+          TARGET_LOWER="$(printf '%s' "$TARGET" | tr '[:upper:]' '[:lower:]')"
+
+          echo "ticket=$TICKET" >> "$GITHUB_OUTPUT"
+          echo "ticket_lower=$TICKET_LOWER" >> "$GITHUB_OUTPUT"
+
+          echo "client_input=$CLIENT" >> "$GITHUB_OUTPUT"
+          echo "client_lower=$CLIENT_LOWER" >> "$GITHUB_OUTPUT"
+
+          echo "target_input=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "target_lower=$TARGET_LOWER" >> "$GITHUB_OUTPUT"
+
+          echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
+
+          echo "Input validation successful."
+
+      # ============================================================
+      # 3. DISPLAY REQUEST
       # ============================================================
 
       - name: Display deployment request
@@ -56,215 +128,282 @@ jobs:
           echo "================================"
           echo "Deployment PR Bot"
           echo "================================"
-          echo "Ticket:  ${{ inputs.ticket }}"
-          echo "Client:  ${{ inputs.client }}"
-          echo "Target:  ${{ inputs.target }}"
-          echo "Release: ${{ inputs.release }}"
+          echo "Ticket:  ${{ steps.inputs.outputs.ticket }}"
+          echo "Client:  ${{ steps.inputs.outputs.client_input }}"
+          echo "Target:  ${{ steps.inputs.outputs.target_input }}"
+          echo "Release: ${{ steps.inputs.outputs.release }}"
           echo "================================"
 
       # ============================================================
-      # 3. VALIDATE INPUTS
-      # ============================================================
-
-      - name: Validate inputs
-        shell: bash
-        run: |
-          TICKET="${{ inputs.ticket }}"
-          CLIENT="${{ inputs.client }}"
-          RELEASE="${{ inputs.release }}"
-
-          if [[ ! "$TICKET" =~ ^[A-Za-z0-9_-]+$ ]]; then
-            echo "::error::Invalid ticket: $TICKET"
-            exit 1
-          fi
-
-          if [[ ! "$CLIENT" =~ ^[A-Za-z0-9_-]+$ ]]; then
-            echo "::error::Invalid client: $CLIENT"
-            exit 1
-          fi
-
-          if [[ ! "$RELEASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Invalid release version: $RELEASE"
-            echo "Expected format: 26.2.3"
-            exit 1
-          fi
-
-          echo "Input validation successful."
-
-      # ============================================================
-      # 4. RESOLVE CLIENT CONFIG
+      # 4. RESOLVE CLIENT CASE-INSENSITIVELY
+      #
+      # Examples:
+      #
+      # centene
+      # CENTENE
+      # Centene
+      #
+      # all resolve to the real directory:
+      #
+      # platform-client/clients/Centene
       # ============================================================
 
       - name: Resolve client configuration
         id: config
         shell: bash
+        env:
+          CLIENT_INPUT: ${{ steps.inputs.outputs.client_input }}
         run: |
-          CLIENT="${{ inputs.client }}"
+          CLIENT_ROOT="platform-client/clients"
 
-          CONFIG_FILE="platform-client/clients/${CLIENT}/config.yml"
+          if [ ! -d "$CLIENT_ROOT" ]; then
+            echo "::error::Client directory does not exist: $CLIENT_ROOT"
+            exit 1
+          fi
 
-          echo "Looking for configuration:"
-          echo "$CONFIG_FILE"
+          MATCH_COUNT=0
+          MATCHED_DIRECTORY=""
 
-          if [ ! -f "$CONFIG_FILE" ]; then
-            echo "::error::Client configuration not found: $CONFIG_FILE"
+          while IFS= read -r CLIENT_DIRECTORY; do
+            DIRECTORY_NAME="$(basename "$CLIENT_DIRECTORY")"
+
+            if [[ "${DIRECTORY_NAME,,}" == "${CLIENT_INPUT,,}" ]]; then
+              MATCH_COUNT=$((MATCH_COUNT + 1))
+              MATCHED_DIRECTORY="$CLIENT_DIRECTORY"
+            fi
+          done < <(
+            find "$CLIENT_ROOT" \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d \
+              -print
+          )
+
+          if [ "$MATCH_COUNT" -eq 0 ]; then
+            echo "::error::Client '$CLIENT_INPUT' was not found."
 
             echo ""
-            echo "Available client configuration files:"
+            echo "Available clients:"
 
-            find platform-client/clients \
-              -maxdepth 3 \
-              -type f \
-              -name "config.yml" \
-              2>/dev/null | sort || true
+            find "$CLIENT_ROOT" \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d \
+              -printf '%f\n' |
+              sort -f
 
             exit 1
           fi
 
+          if [ "$MATCH_COUNT" -gt 1 ]; then
+            echo "::error::Multiple client directories match '$CLIENT_INPUT' case-insensitively."
+            echo "Refusing to guess."
+            exit 1
+          fi
+
+          ACTUAL_CLIENT="$(basename "$MATCHED_DIRECTORY")"
+          CONFIG_FILE="${MATCHED_DIRECTORY}/config.yml"
+
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "::error::config.yml not found for client '$ACTUAL_CLIENT'."
+            echo "Expected: $CONFIG_FILE"
+            exit 1
+          fi
+
           echo ""
-          echo "Configuration found:"
+          echo "Client resolved:"
+          echo "$CLIENT_INPUT -> $ACTUAL_CLIENT"
+
+          echo ""
+          echo "Configuration:"
           echo "$CONFIG_FILE"
 
+          echo "actual_client=$ACTUAL_CLIENT" >> "$GITHUB_OUTPUT"
           echo "config_file=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 5. READ EXACT TARGET
+      # 5. RESOLVE TARGET CASE-INSENSITIVELY
+      #
+      # Supports:
+      #
+      # uat-preview:
+      # uat-preview: &uat
+      # production-a: &production
+      #
+      # User may enter:
+      #
+      # UAT-PREVIEW
+      # Uat-Preview
+      # uat-preview
+      #
       # ============================================================
 
-      - name: Read deployment target
+      - name: Resolve deployment target
         id: target
         shell: bash
+        env:
+          CONFIG_FILE: ${{ steps.config.outputs.config_file }}
+          TARGET_INPUT: ${{ steps.inputs.outputs.target_input }}
         run: |
-          CONFIG_FILE="${{ steps.config.outputs.config_file }}"
-          TARGET="${{ inputs.target }}"
-
-          echo "Reading configuration:"
-          echo "$CONFIG_FILE"
-
-          echo ""
-          echo "Looking for exact target:"
-          echo "$TARGET"
-
-          node - "$CONFIG_FILE" "$TARGET" <<'NODE'
+          node - "$CONFIG_FILE" "$TARGET_INPUT" <<'NODE'
           const fs = require("fs");
 
           const file = process.argv[2];
-          const target = process.argv[3];
+          const requestedTarget = process.argv[3];
 
           const content = fs.readFileSync(file, "utf8");
           const lines = content.split(/\r?\n/);
 
-          let targetFound = false;
-          let currentRelease = null;
+          const requestedLower =
+            requestedTarget.toLowerCase();
 
-          const escapedTarget = target.replace(
-            /[.*+?^${}()|[\]\\]/g,
-            "\\$&"
-          );
+          const matches = [];
 
           /*
-           * Supports:
+           * Match YAML section declarations such as:
            *
            * uat-preview:
            * uat-preview: &uat
-           * uat-stable:
            * production-a: &production
-           * production-b:
            *
-           * Exact target names only.
+           * Capture the actual key from the file.
            */
-          const targetPattern = new RegExp(
-            `^${escapedTarget}:\\s*(?:&[A-Za-z0-9_-]+)?\\s*$`
-          );
+          const sectionPattern =
+            /^([A-Za-z0-9._-]+):\s*(?:&[A-Za-z0-9._-]+)?\s*$/;
 
           for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
+            const trimmed = lines[i].trim();
 
-            if (!targetPattern.test(line.trim())) {
+            const match =
+              trimmed.match(sectionPattern);
+
+            if (!match) {
               continue;
             }
 
-            targetFound = true;
+            const actualTarget = match[1];
 
-            console.log("");
-            console.log(`Found target: ${line.trim()}`);
-
-            const targetIndent =
-              line.length - line.trimStart().length;
-
-            for (let j = i + 1; j < lines.length; j++) {
-              const nextLine = lines[j];
-
-              if (!nextLine.trim()) {
-                continue;
-              }
-
-              const nextIndent =
-                nextLine.length - nextLine.trimStart().length;
-
-              /*
-               * Stop when another YAML section begins
-               * at the same or lower indentation.
-               */
-              if (
-                nextIndent <= targetIndent &&
-                /^[A-Za-z0-9_-]+:/.test(nextLine.trim())
-              ) {
-                break;
-              }
-
-              const tagMatch = nextLine.match(
-                /^\s*continuous_deploy_tag:\s*([^\s#]+)/
-              );
-
-              if (tagMatch) {
-                currentRelease = tagMatch[1];
-                break;
-              }
+            if (
+              actualTarget.toLowerCase() ===
+              requestedLower
+            ) {
+              matches.push({
+                index: i,
+                actualTarget,
+                line: lines[i]
+              });
             }
-
-            break;
           }
 
-          if (!targetFound) {
+          if (matches.length === 0) {
             console.error(
-              `ERROR: Deployment target '${target}' was not found in ${file}`
+              `ERROR: Deployment target '${requestedTarget}' was not found in ${file}.`
             );
 
             console.error("");
-            console.error("Possible YAML sections:");
+            console.error("Available sections:");
 
             for (const line of lines) {
-              const trimmed = line.trim();
+              const match =
+                line.trim().match(sectionPattern);
 
-              if (
-                /^[A-Za-z0-9_-]+:\s*(?:&[A-Za-z0-9_-]+)?\s*$/.test(
-                  trimmed
-                )
-              ) {
-                console.error(` - ${trimmed}`);
+              if (match) {
+                console.error(` - ${match[1]}`);
               }
             }
 
             process.exit(1);
           }
 
+          if (matches.length > 1) {
+            console.error(
+              `ERROR: Multiple YAML sections match '${requestedTarget}' case-insensitively.`
+            );
+
+            console.error(
+              "Refusing to guess which section should be changed."
+            );
+
+            process.exit(1);
+          }
+
+          const targetMatch = matches[0];
+
+          const actualTarget =
+            targetMatch.actualTarget;
+
+          const targetLine =
+            targetMatch.line;
+
+          const targetIndex =
+            targetMatch.index;
+
+          const targetIndent =
+            targetLine.length -
+            targetLine.trimStart().length;
+
+          let currentRelease = null;
+
+          for (
+            let i = targetIndex + 1;
+            i < lines.length;
+            i++
+          ) {
+            const line = lines[i];
+
+            if (!line.trim()) {
+              continue;
+            }
+
+            const indentation =
+              line.length -
+              line.trimStart().length;
+
+            if (
+              indentation <= targetIndent &&
+              /^[A-Za-z0-9._-]+:/.test(
+                line.trim()
+              )
+            ) {
+              break;
+            }
+
+            const releaseMatch =
+              line.match(
+                /^\s*continuous_deploy_tag:\s*([^\s#]+)/
+              );
+
+            if (releaseMatch) {
+              currentRelease =
+                releaseMatch[1];
+
+              break;
+            }
+          }
+
           if (!currentRelease) {
             console.error(
-              `ERROR: continuous_deploy_tag was not found under '${target}'.`
+              `ERROR: continuous_deploy_tag was not found under '${actualTarget}'.`
             );
 
             process.exit(1);
           }
 
           console.log("");
-          console.log("================================");
-          console.log("Configuration validated");
-          console.log("================================");
-          console.log(`File:            ${file}`);
-          console.log(`Target:          ${target}`);
-          console.log(`Current release: ${currentRelease}`);
-          console.log("================================");
+          console.log("Target resolved:");
+          console.log(
+            `${requestedTarget} -> ${actualTarget}`
+          );
+
+          console.log("");
+          console.log(
+            `Current release: ${currentRelease}`
+          );
+
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `actual_target=${actualTarget}\n`
+          );
 
           fs.appendFileSync(
             process.env.GITHUB_OUTPUT,
@@ -273,84 +412,144 @@ jobs:
           NODE
 
       # ============================================================
-      # 6. VALIDATE REQUESTED RELEASE
+      # 6. VALIDATE RELEASE
+      #
+      # Release comparison is also case-insensitive,
+      # but the requested release text is preserved.
       # ============================================================
 
       - name: Validate requested release
         shell: bash
+        env:
+          CURRENT_RELEASE: ${{ steps.target.outputs.current_release }}
+          REQUESTED_RELEASE: ${{ steps.inputs.outputs.release }}
         run: |
-          CURRENT="${{ steps.target.outputs.current_release }}"
-          REQUESTED="${{ inputs.release }}"
-
-          echo "Current release:   $CURRENT"
-          echo "Requested release: $REQUESTED"
-
-          if [ "$CURRENT" = "$REQUESTED" ]; then
-            echo "::error::Release $REQUESTED is already configured for ${{ inputs.client }} / ${{ inputs.target }}"
+          if [[ "${CURRENT_RELEASE,,}" == "${REQUESTED_RELEASE,,}" ]]; then
+            echo "::error::Release '$REQUESTED_RELEASE' is already configured."
             exit 1
           fi
 
-          echo ""
+          echo "Current release:   $CURRENT_RELEASE"
+          echo "Requested release: $REQUESTED_RELEASE"
           echo "Release change required."
 
       # ============================================================
-      # 7. CHECK DUPLICATE BRANCH
+      # 7. CHECK BRANCH CASE-INSENSITIVELY
+      #
+      # TEST-106
+      # test-106
+      # Test-106
+      #
+      # are considered duplicates.
       # ============================================================
 
       - name: Check duplicate branch
         shell: bash
+        env:
+          REQUESTED_BRANCH: ${{ steps.inputs.outputs.ticket }}
         run: |
-          BRANCH="${{ inputs.ticket }}"
+          echo "Checking existing branches case-insensitively..."
 
-          echo "Checking branch:"
-          echo "$BRANCH"
+          MATCHING_BRANCH=""
 
-          if git ls-remote \
-            --exit-code \
-            --heads \
-            origin \
-            "$BRANCH" >/dev/null 2>&1
-          then
-            echo "::error::Branch '$BRANCH' already exists."
+          while IFS= read -r REMOTE_BRANCH; do
+            BRANCH_NAME="${REMOTE_BRANCH#refs/heads/}"
+
+            if [[ "${BRANCH_NAME,,}" == "${REQUESTED_BRANCH,,}" ]]; then
+              MATCHING_BRANCH="$BRANCH_NAME"
+              break
+            fi
+          done < <(
+            git ls-remote \
+              --heads \
+              origin |
+              awk '{print $2}'
+          )
+
+          if [ -n "$MATCHING_BRANCH" ]; then
+            echo "::error::A branch already exists with the same name ignoring case."
+            echo "Requested: $REQUESTED_BRANCH"
+            echo "Existing:  $MATCHING_BRANCH"
             exit 1
           fi
 
-          echo "Branch does not exist."
+          echo "No duplicate branch found."
 
       # ============================================================
-      # 8. UPDATE ONLY continuous_deploy_tag
+      # 8. CHECK OPEN PR FOR TICKET/BRANCH
+      # ============================================================
+
+      - name: Check duplicate Pull Request
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_BRANCH: ${{ steps.inputs.outputs.ticket }}
+        run: |
+          EXISTING_PR=""
+
+          while IFS='|' read -r PR_NUMBER PR_HEAD PR_URL; do
+            if [[ "${PR_HEAD,,}" == "${REQUESTED_BRANCH,,}" ]]; then
+              EXISTING_PR="$PR_NUMBER|$PR_HEAD|$PR_URL"
+              break
+            fi
+          done < <(
+            gh pr list \
+              --state open \
+              --limit 100 \
+              --json number,headRefName,url \
+              --jq '.[] | "\(.number)|\(.headRefName)|\(.url)"'
+          )
+
+          if [ -n "$EXISTING_PR" ]; then
+            IFS='|' read -r \
+              PR_NUMBER \
+              PR_HEAD \
+              PR_URL <<< "$EXISTING_PR"
+
+            echo "::error::An open Pull Request already exists for this branch ignoring case."
+            echo "PR:     #$PR_NUMBER"
+            echo "Branch: $PR_HEAD"
+            echo "URL:    $PR_URL"
+
+            exit 1
+          fi
+
+          echo "No duplicate Pull Request found."
+
+      # ============================================================
+      # 9. UPDATE ONLY continuous_deploy_tag
       #
-      # IMPORTANT:
-      # Preserve the original CRLF/LF line-ending format.
+      # Preserve:
+      #
+      # - actual target casing
+      # - CRLF/LF
+      # - YAML anchors
+      # - spacing
+      # - unrelated configuration
       # ============================================================
 
       - name: Update continuous deploy tag
         id: update
         shell: bash
+        env:
+          CONFIG_FILE: ${{ steps.config.outputs.config_file }}
+          ACTUAL_TARGET: ${{ steps.target.outputs.actual_target }}
+          REQUESTED_RELEASE: ${{ steps.inputs.outputs.release }}
         run: |
-          CONFIG_FILE="${{ steps.config.outputs.config_file }}"
-          TARGET="${{ inputs.target }}"
-          RELEASE="${{ inputs.release }}"
+          node - \
+            "$CONFIG_FILE" \
+            "$ACTUAL_TARGET" \
+            "$REQUESTED_RELEASE" <<'NODE'
 
-          node - "$CONFIG_FILE" "$TARGET" "$RELEASE" <<'NODE'
           const fs = require("fs");
 
           const file = process.argv[2];
-          const target = process.argv[3];
+          const actualTarget = process.argv[3];
           const requestedRelease = process.argv[4];
 
           const originalContent =
             fs.readFileSync(file, "utf8");
 
-          /*
-           * Detect original line endings.
-           *
-           * Windows:
-           * \r\n
-           *
-           * Linux:
-           * \n
-           */
           const lineEnding =
             originalContent.includes("\r\n")
               ? "\r\n"
@@ -362,10 +561,6 @@ jobs:
           const lines =
             originalContent.split(/\r?\n/);
 
-          /*
-           * split() creates a trailing empty element
-           * when the file ends with a newline.
-           */
           if (
             endedWithNewline &&
             lines.length > 0 &&
@@ -374,33 +569,49 @@ jobs:
             lines.pop();
           }
 
-          const escapedTarget = target.replace(
-            /[.*+?^${}()|[\]\\]/g,
-            "\\$&"
-          );
+          const escapedTarget =
+            actualTarget.replace(
+              /[.*+?^${}()|[\]\\]/g,
+              "\\$&"
+            );
 
-          const targetPattern = new RegExp(
-            `^${escapedTarget}:\\s*(?:&[A-Za-z0-9_-]+)?\\s*$`
-          );
+          const targetPattern =
+            new RegExp(
+              `^${escapedTarget}:\\s*(?:&[A-Za-z0-9._-]+)?\\s*$`
+            );
 
           let targetFound = false;
           let tagFound = false;
           let oldRelease = null;
 
-          for (let i = 0; i < lines.length; i++) {
+          for (
+            let i = 0;
+            i < lines.length;
+            i++
+          ) {
             const line = lines[i];
 
-            if (!targetPattern.test(line.trim())) {
+            if (
+              !targetPattern.test(
+                line.trim()
+              )
+            ) {
               continue;
             }
 
             targetFound = true;
 
             const targetIndent =
-              line.length - line.trimStart().length;
+              line.length -
+              line.trimStart().length;
 
-            for (let j = i + 1; j < lines.length; j++) {
-              const nextLine = lines[j];
+            for (
+              let j = i + 1;
+              j < lines.length;
+              j++
+            ) {
+              const nextLine =
+                lines[j];
 
               if (!nextLine.trim()) {
                 continue;
@@ -412,30 +623,17 @@ jobs:
 
               if (
                 nextIndent <= targetIndent &&
-                /^[A-Za-z0-9_-]+:/.test(
+                /^[A-Za-z0-9._-]+:/.test(
                   nextLine.trim()
                 )
               ) {
                 break;
               }
 
-              /*
-               * Example:
-               *
-               *   continuous_deploy_tag: 26.3.1
-               *
-               * Group 1:
-               * spaces + continuous_deploy_tag + spacing
-               *
-               * Group 2:
-               * release
-               *
-               * Group 3:
-               * anything after release
-               */
-              const match = nextLine.match(
-                /^(\s*continuous_deploy_tag:\s*)([^\s#]+)(.*)$/
-              );
+              const match =
+                nextLine.match(
+                  /^(\s*continuous_deploy_tag:\s*)([^\s#]+)(.*)$/
+                );
 
               if (!match) {
                 continue;
@@ -443,16 +641,19 @@ jobs:
 
               oldRelease = match[2];
 
-              if (oldRelease === requestedRelease) {
+              if (
+                oldRelease.toLowerCase() ===
+                requestedRelease.toLowerCase()
+              ) {
                 console.error(
-                  `Release ${requestedRelease} is already configured for ${target}.`
+                  `Release '${requestedRelease}' is already configured.`
                 );
 
                 process.exit(1);
               }
 
               /*
-               * Replace ONLY release value.
+               * Replace ONLY the tag value.
                */
               lines[j] =
                 `${match[1]}${requestedRelease}${match[3]}`;
@@ -467,7 +668,7 @@ jobs:
 
           if (!targetFound) {
             console.error(
-              `ERROR: Target '${target}' was not found.`
+              `ERROR: Target '${actualTarget}' was not found.`
             );
 
             process.exit(1);
@@ -475,15 +676,12 @@ jobs:
 
           if (!tagFound) {
             console.error(
-              `ERROR: continuous_deploy_tag was not found under '${target}'.`
+              `ERROR: continuous_deploy_tag was not found under '${actualTarget}'.`
             );
 
             process.exit(1);
           }
 
-          /*
-           * Reconstruct using ORIGINAL line endings.
-           */
           let newContent =
             lines.join(lineEnding);
 
@@ -498,13 +696,10 @@ jobs:
           );
 
           console.log("");
-          console.log("================================");
-          console.log("Configuration updated");
-          console.log("================================");
-          console.log(`Target:   ${target}`);
-          console.log(`Previous: ${oldRelease}`);
-          console.log(`New:      ${requestedRelease}`);
-          console.log("================================");
+          console.log("Configuration updated.");
+          console.log(
+            `${actualTarget}: ${oldRelease} -> ${requestedRelease}`
+          );
 
           fs.appendFileSync(
             process.env.GITHUB_OUTPUT,
@@ -513,22 +708,14 @@ jobs:
           NODE
 
       # ============================================================
-      # 9. VERIFY CHANGE
-      #
-      # Safety requirement:
-      #
-      # Only config.yml may change.
-      #
-      # Exactly:
-      # 1 removed line
-      # 1 added line
+      # 10. VERIFY EXACTLY ONE LINE CHANGED
       # ============================================================
 
       - name: Verify configuration change
         shell: bash
+        env:
+          CONFIG_FILE: ${{ steps.config.outputs.config_file }}
         run: |
-          CONFIG_FILE="${{ steps.config.outputs.config_file }}"
-
           echo ""
           echo "================================"
           echo "GIT DIFF"
@@ -551,9 +738,11 @@ jobs:
 
           if [ "$CHANGED_FILES" != "$CONFIG_FILE" ]; then
             echo "::error::Unexpected files were modified."
+
             echo ""
             echo "Expected:"
             echo "$CONFIG_FILE"
+
             echo ""
             echo "Actual:"
             echo "$CHANGED_FILES"
@@ -562,22 +751,22 @@ jobs:
           fi
 
           ADDED_LINES="$(
-            git diff --numstat -- "$CONFIG_FILE" |
-            awk '{print $1}'
+            git diff \
+              --numstat \
+              -- "$CONFIG_FILE" |
+              awk '{print $1}'
           )"
 
           REMOVED_LINES="$(
-            git diff --numstat -- "$CONFIG_FILE" |
-            awk '{print $2}'
+            git diff \
+              --numstat \
+              -- "$CONFIG_FILE" |
+              awk '{print $2}'
           )"
 
           echo ""
-          echo "Added lines:"
-          echo "$ADDED_LINES"
-
-          echo ""
-          echo "Removed lines:"
-          echo "$REMOVED_LINES"
+          echo "Added lines:   $ADDED_LINES"
+          echo "Removed lines: $REMOVED_LINES"
 
           if [ "$ADDED_LINES" -ne 1 ]; then
             echo "::error::Expected exactly 1 added line."
@@ -591,32 +780,46 @@ jobs:
             exit 1
           fi
 
+          /*
+          This check intentionally stays in bash below.
+          */
+
           echo ""
           echo "Diff validation successful."
 
       # ============================================================
-      # 10. CREATE BRANCH
+      # 11. CREATE BRANCH
+      #
+      # Preserve ticket casing supplied by user.
+      #
+      # Example:
+      #
+      # CC-22752 remains CC-22752.
       # ============================================================
 
       - name: Create deployment branch
         shell: bash
+        env:
+          BRANCH: ${{ steps.inputs.outputs.ticket }}
         run: |
-          BRANCH="${{ inputs.ticket }}"
-
           echo "Creating branch:"
           echo "$BRANCH"
 
           git checkout -b "$BRANCH"
 
       # ============================================================
-      # 11. COMMIT
+      # 12. COMMIT
       # ============================================================
 
       - name: Commit configuration change
         shell: bash
+        env:
+          CONFIG_FILE: ${{ steps.config.outputs.config_file }}
+          TICKET: ${{ steps.inputs.outputs.ticket }}
+          CLIENT: ${{ steps.config.outputs.actual_client }}
+          TARGET: ${{ steps.target.outputs.actual_target }}
+          RELEASE: ${{ steps.inputs.outputs.release }}
         run: |
-          CONFIG_FILE="${{ steps.config.outputs.config_file }}"
-
           git config \
             user.name \
             "deployment-pr-bot"
@@ -628,17 +831,17 @@ jobs:
           git add "$CONFIG_FILE"
 
           git commit \
-            -m "${{ inputs.ticket }}: Deploy ${{ inputs.release }} to ${{ inputs.target }} for ${{ inputs.client }}"
+            -m "$TICKET: Deploy $RELEASE to $TARGET for $CLIENT"
 
       # ============================================================
-      # 12. PUSH
+      # 13. PUSH
       # ============================================================
 
       - name: Push deployment branch
         shell: bash
+        env:
+          BRANCH: ${{ steps.inputs.outputs.ticket }}
         run: |
-          BRANCH="${{ inputs.ticket }}"
-
           echo "Pushing branch:"
           echo "$BRANCH"
 
@@ -647,7 +850,7 @@ jobs:
             "$BRANCH"
 
       # ============================================================
-      # 13. CREATE PULL REQUEST
+      # 14. CREATE PR
       # ============================================================
 
       - name: Create Pull Request
@@ -655,31 +858,45 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+
+          TICKET: ${{ steps.inputs.outputs.ticket }}
+
+          CLIENT: ${{ steps.config.outputs.actual_client }}
+
+          TARGET: ${{ steps.target.outputs.actual_target }}
+
+          RELEASE: ${{ steps.inputs.outputs.release }}
+
+          CONFIG_FILE: ${{ steps.config.outputs.config_file }}
+
+          OLD_RELEASE: ${{ steps.update.outputs.old_release }}
         run: |
+          PR_TITLE="$TICKET - Deploy $RELEASE to $TARGET for $CLIENT"
+
           PR_URL=$(gh pr create \
             --base "${{ github.event.repository.default_branch }}" \
-            --head "${{ inputs.ticket }}" \
-            --title "${{ inputs.ticket }} - Deploy ${{ inputs.release }} to ${{ inputs.target }} for ${{ inputs.client }}" \
+            --head "$TICKET" \
+            --title "$PR_TITLE" \
             --body "$(cat <<EOF
           ## Deployment Request
 
-          **Deployment Ticket:** ${{ inputs.ticket }}
+          **Deployment Ticket:** $TICKET
 
-          **Client:** ${{ inputs.client }}
+          **Client:** $CLIENT
 
-          **Deployment Target:** ${{ inputs.target }}
+          **Deployment Target:** $TARGET
 
-          **Release:** ${{ inputs.release }}
+          **Release:** $RELEASE
 
           ## Configuration File
 
-          \`${{ steps.config.outputs.config_file }}\`
+          \`$CONFIG_FILE\`
 
           ## Configuration Change
 
           **Target**
 
-          \`${{ inputs.target }}\`
+          \`$TARGET\`
 
           **Field**
 
@@ -687,15 +904,15 @@ jobs:
 
           **Previous release**
 
-          \`${{ steps.update.outputs.old_release }}\`
+          \`$OLD_RELEASE\`
 
           **New release**
 
-          \`${{ inputs.release }}\`
+          \`$RELEASE\`
 
           ## Branch
 
-          \`${{ inputs.ticket }}\`
+          \`$TICKET\`
 
           ---
 
@@ -706,7 +923,7 @@ jobs:
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 14. SUMMARY
+      # 15. FINAL SUMMARY
       # ============================================================
 
       - name: Deployment PR summary
@@ -719,15 +936,15 @@ jobs:
 
           echo ""
           echo "Ticket:"
-          echo "${{ inputs.ticket }}"
+          echo "${{ steps.inputs.outputs.ticket }}"
 
           echo ""
           echo "Client:"
-          echo "${{ inputs.client }}"
+          echo "${{ steps.config.outputs.actual_client }}"
 
           echo ""
           echo "Target:"
-          echo "${{ inputs.target }}"
+          echo "${{ steps.target.outputs.actual_target }}"
 
           echo ""
           echo "Configuration:"
@@ -739,11 +956,11 @@ jobs:
 
           echo ""
           echo "New release:"
-          echo "${{ inputs.release }}"
+          echo "${{ steps.inputs.outputs.release }}"
 
           echo ""
           echo "Branch:"
-          echo "${{ inputs.ticket }}"
+          echo "${{ steps.inputs.outputs.ticket }}"
 
           echo ""
           echo "Pull Request:"
