@@ -18,8 +18,8 @@ on:
         required: true
         type: choice
         options:
-          - uat-stable
           - uat-preview
+          - uat-stable
           - production-a
           - production-b
 
@@ -28,15 +28,30 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
-  validate-request:
+  create-deployment-pr:
     runs-on: ubuntu-latest
 
     steps:
+      # ------------------------------------------------------------
+      # 1. Checkout repository
+      # ------------------------------------------------------------
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ------------------------------------------------------------
+      # 2. Display request
+      # ------------------------------------------------------------
 
       - name: Display deployment request
+        shell: bash
         run: |
           echo "================================"
           echo "Deployment PR Bot"
@@ -47,16 +62,45 @@ jobs:
           echo "Release: ${{ inputs.release }}"
           echo "================================"
 
-      - name: Show repository files
+      # ------------------------------------------------------------
+      # 3. Validate basic inputs
+      # ------------------------------------------------------------
+
+      - name: Validate inputs
+        shell: bash
         run: |
-          echo "Repository files:"
-          find . -maxdepth 5 -type f | sort
+          TICKET="${{ inputs.ticket }}"
+          CLIENT="${{ inputs.client }}"
+          RELEASE="${{ inputs.release }}"
+
+          if [[ ! "$TICKET" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo "::error::Invalid ticket: $TICKET"
+            exit 1
+          fi
+
+          if [[ ! "$CLIENT" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo "::error::Invalid client: $CLIENT"
+            exit 1
+          fi
+
+          if [[ ! "$RELEASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid release version: $RELEASE"
+            echo "Expected format similar to 26.2.3"
+            exit 1
+          fi
+
+          echo "Input validation successful."
+
+      # ------------------------------------------------------------
+      # 4. Find client configuration
+      # ------------------------------------------------------------
 
       - name: Resolve client configuration
         id: config
         shell: bash
         run: |
           CLIENT="${{ inputs.client }}"
+
           CONFIG_FILE="platform-client/clients/${CLIENT}/config.yml"
 
           echo "Looking for configuration:"
@@ -64,13 +108,31 @@ jobs:
 
           if [ ! -f "$CONFIG_FILE" ]; then
             echo "::error::Client configuration not found: $CONFIG_FILE"
+
+            echo ""
+            echo "Available files:"
+            find platform-client/clients -maxdepth 3 -type f 2>/dev/null | sort || true
+
             exit 1
           fi
 
+          echo ""
           echo "Configuration found:"
           echo "$CONFIG_FILE"
 
           echo "config_file=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------
+      # 5. Read target and current release
+      #
+      # Supports:
+      #
+      # uat-preview:
+      #
+      # AND:
+      #
+      # uat-preview: &uat
+      # ------------------------------------------------------------
 
       - name: Read deployment target
         id: target
@@ -81,6 +143,7 @@ jobs:
 
           echo "Reading configuration:"
           echo "$CONFIG_FILE"
+
           echo ""
           echo "Looking for exact target:"
           echo "$TARGET"
@@ -92,55 +155,111 @@ jobs:
           const target = process.argv[3];
 
           const content = fs.readFileSync(file, "utf8");
-
           const lines = content.split(/\r?\n/);
 
           let targetFound = false;
           let currentRelease = null;
 
+          const escapedTarget = target.replace(
+            /[.*+?^${}()|[\]\\]/g,
+            "\\$&"
+          );
+
+          /*
+           * Match:
+           *
+           * uat-preview:
+           *
+           * OR
+           *
+           * uat-preview: &uat
+           *
+           * But DO NOT match:
+           *
+           * something-uat-preview:
+           * uat-preview-other:
+           */
+          const targetPattern = new RegExp(
+            `^${escapedTarget}:\\s*(?:&[A-Za-z0-9_-]+)?\\s*$`
+          );
+
           for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
+            const trimmedLine = line.trim();
 
-            if (line.trim() === `${target}:`) {
-              targetFound = true;
+            if (!targetPattern.test(trimmedLine)) {
+              continue;
+            }
 
-              const targetIndent = line.length - line.trimStart().length;
+            targetFound = true;
 
-              for (let j = i + 1; j < lines.length; j++) {
-                const nextLine = lines[j];
+            console.log("");
+            console.log(`Found target: ${trimmedLine}`);
 
-                if (!nextLine.trim()) {
-                  continue;
-                }
+            const targetIndent =
+              line.length - line.trimStart().length;
 
-                const nextIndent =
-                  nextLine.length - nextLine.trimStart().length;
+            /*
+             * Search only inside this target block.
+             */
+            for (let j = i + 1; j < lines.length; j++) {
+              const nextLine = lines[j];
 
-                if (
-                  nextIndent <= targetIndent &&
-                  /^[A-Za-z0-9_-]+:/.test(nextLine.trim())
-                ) {
-                  break;
-                }
-
-                const match = nextLine.match(
-                  /^\s*continuous_deploy_tag:\s*([^\s#]+)/
-                );
-
-                if (match) {
-                  currentRelease = match[1];
-                  break;
-                }
+              /*
+               * Ignore blank lines.
+               */
+              if (!nextLine.trim()) {
+                continue;
               }
 
-              break;
+              const nextIndent =
+                nextLine.length - nextLine.trimStart().length;
+
+              /*
+               * If we return to the same or lower indentation,
+               * we've reached the next YAML section.
+               */
+              if (
+                nextIndent <= targetIndent &&
+                /^[A-Za-z0-9_-]+:/.test(nextLine.trim())
+              ) {
+                break;
+              }
+
+              /*
+               * Find continuous_deploy_tag.
+               */
+              const tagMatch = nextLine.match(
+                /^\s*continuous_deploy_tag:\s*([^\s#]+)/
+              );
+
+              if (tagMatch) {
+                currentRelease = tagMatch[1];
+                break;
+              }
             }
+
+            break;
           }
 
           if (!targetFound) {
             console.error(
               `ERROR: Deployment target '${target}' was not found in ${file}`
             );
+
+            console.error("");
+            console.error("Available top-level targets:");
+
+            for (const line of lines) {
+              if (
+                /^[A-Za-z0-9_-]+:\s*(?:&[A-Za-z0-9_-]+)?\s*$/.test(
+                  line.trim()
+                )
+              ) {
+                console.error(` - ${line.trim()}`);
+              }
+            }
+
             process.exit(1);
           }
 
@@ -166,6 +285,10 @@ jobs:
           );
           NODE
 
+      # ------------------------------------------------------------
+      # 6. Validate requested release differs from current
+      # ------------------------------------------------------------
+
       - name: Validate requested release
         shell: bash
         run: |
@@ -180,37 +303,364 @@ jobs:
             exit 1
           fi
 
-          echo "Release change is required."
+          echo ""
+          echo "Release change required."
 
-      - name: Show deployment plan
+      # ------------------------------------------------------------
+      # 7. Check whether ticket branch already exists
+      # ------------------------------------------------------------
+
+      - name: Check duplicate branch
+        shell: bash
+        run: |
+          BRANCH="${{ inputs.ticket }}"
+
+          echo "Checking whether branch exists:"
+          echo "$BRANCH"
+
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "::error::Branch '$BRANCH' already exists."
+            exit 1
+          fi
+
+          echo "Branch does not exist."
+
+      # ------------------------------------------------------------
+      # 8. Update ONLY continuous_deploy_tag
+      # ------------------------------------------------------------
+
+      - name: Update continuous deploy tag
+        id: update
+        shell: bash
+        run: |
+          CONFIG_FILE="${{ steps.config.outputs.config_file }}"
+          TARGET="${{ inputs.target }}"
+          RELEASE="${{ inputs.release }}"
+
+          node - "$CONFIG_FILE" "$TARGET" "$RELEASE" <<'NODE'
+          const fs = require("fs");
+
+          const file = process.argv[2];
+          const target = process.argv[3];
+          const requestedRelease = process.argv[4];
+
+          const originalContent = fs.readFileSync(file, "utf8");
+
+          /*
+           * Preserve whether the original file ended with a newline.
+           */
+          const hasFinalNewline =
+            originalContent.endsWith("\n");
+
+          const lines = originalContent.split(/\r?\n/);
+
+          /*
+           * split() creates an extra empty item when the file ends
+           * with a newline. Remove it and restore the newline later.
+           */
+          if (
+            hasFinalNewline &&
+            lines.length > 0 &&
+            lines[lines.length - 1] === ""
+          ) {
+            lines.pop();
+          }
+
+          const escapedTarget = target.replace(
+            /[.*+?^${}()|[\]\\]/g,
+            "\\$&"
+          );
+
+          const targetPattern = new RegExp(
+            `^${escapedTarget}:\\s*(?:&[A-Za-z0-9_-]+)?\\s*$`
+          );
+
+          let targetFound = false;
+          let tagFound = false;
+          let oldRelease = null;
+
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+
+            if (!targetPattern.test(line.trim())) {
+              continue;
+            }
+
+            targetFound = true;
+
+            const targetIndent =
+              line.length - line.trimStart().length;
+
+            for (let j = i + 1; j < lines.length; j++) {
+              const nextLine = lines[j];
+
+              if (!nextLine.trim()) {
+                continue;
+              }
+
+              const nextIndent =
+                nextLine.length - nextLine.trimStart().length;
+
+              if (
+                nextIndent <= targetIndent &&
+                /^[A-Za-z0-9_-]+:/.test(nextLine.trim())
+              ) {
+                break;
+              }
+
+              /*
+               * Capture:
+               *
+               * 1 = indentation + key + spaces
+               * 2 = existing release
+               * 3 = anything following the release
+               */
+              const match = nextLine.match(
+                /^(\s*continuous_deploy_tag:\s*)([^\s#]+)(.*)$/
+              );
+
+              if (!match) {
+                continue;
+              }
+
+              oldRelease = match[2];
+
+              if (oldRelease === requestedRelease) {
+                console.error(
+                  `Release ${requestedRelease} is already configured for ${target}`
+                );
+                process.exit(1);
+              }
+
+              /*
+               * Replace ONLY the release value.
+               */
+              lines[j] =
+                `${match[1]}${requestedRelease}${match[3]}`;
+
+              tagFound = true;
+              break;
+            }
+
+            break;
+          }
+
+          if (!targetFound) {
+            console.error(
+              `ERROR: Target '${target}' was not found.`
+            );
+            process.exit(1);
+          }
+
+          if (!tagFound) {
+            console.error(
+              `ERROR: continuous_deploy_tag was not found under '${target}'.`
+            );
+            process.exit(1);
+          }
+
+          let newContent = lines.join("\n");
+
+          if (hasFinalNewline) {
+            newContent += "\n";
+          }
+
+          fs.writeFileSync(file, newContent);
+
+          console.log("");
+          console.log("Configuration updated.");
+          console.log(
+            `${target}: ${oldRelease} -> ${requestedRelease}`
+          );
+
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `old_release=${oldRelease}\n`
+          );
+          NODE
+
+      # ------------------------------------------------------------
+      # 9. Verify exactly the expected file changed
+      # ------------------------------------------------------------
+
+      - name: Verify configuration change
+        shell: bash
+        run: |
+          CONFIG_FILE="${{ steps.config.outputs.config_file }}"
+
+          echo ""
+          echo "================================"
+          echo "Git diff"
+          echo "================================"
+
+          git diff -- "$CONFIG_FILE"
+
+          echo ""
+          echo "================================"
+
+          if git diff --quiet; then
+            echo "::error::No configuration change was produced."
+            exit 1
+          fi
+
+          CHANGED_FILES="$(git diff --name-only)"
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          if [ "$CHANGED_FILES" != "$CONFIG_FILE" ]; then
+            echo "::error::Unexpected files were modified."
+            exit 1
+          fi
+
+          CHANGE_COUNT="$(git diff --numstat -- "$CONFIG_FILE" | awk '{print $1 + $2}')"
+
+          echo ""
+          echo "Changed lines:"
+          echo "$CHANGE_COUNT"
+
+          if [ "$CHANGE_COUNT" -ne 2 ]; then
+            echo "::error::Expected exactly one removed line and one added line."
+            echo "Refusing to create PR."
+            exit 1
+          fi
+
+          echo ""
+          echo "Diff validation successful."
+
+      # ------------------------------------------------------------
+      # 10. Create branch
+      # ------------------------------------------------------------
+
+      - name: Create deployment branch
+        shell: bash
+        run: |
+          BRANCH="${{ inputs.ticket }}"
+
+          echo "Creating branch:"
+          echo "$BRANCH"
+
+          git checkout -b "$BRANCH"
+
+      # ------------------------------------------------------------
+      # 11. Commit
+      # ------------------------------------------------------------
+
+      - name: Commit configuration change
+        shell: bash
+        run: |
+          CONFIG_FILE="${{ steps.config.outputs.config_file }}"
+
+          git config user.name "deployment-pr-bot"
+          git config user.email "deployment-pr-bot@users.noreply.github.com"
+
+          git add "$CONFIG_FILE"
+
+          git commit \
+            -m "${{ inputs.ticket }}: Deploy ${{ inputs.release }} to ${{ inputs.target }} for ${{ inputs.client }}"
+
+      # ------------------------------------------------------------
+      # 12. Push branch
+      # ------------------------------------------------------------
+
+      - name: Push deployment branch
+        shell: bash
+        run: |
+          git push origin "${{ inputs.ticket }}"
+
+      # ------------------------------------------------------------
+      # 13. Create PR
+      # ------------------------------------------------------------
+
+      - name: Create Pull Request
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_URL=$(gh pr create \
+            --base "${{ github.event.repository.default_branch }}" \
+            --head "${{ inputs.ticket }}" \
+            --title "${{ inputs.ticket }} - Deploy ${{ inputs.release }} to ${{ inputs.target }} for ${{ inputs.client }}" \
+            --body "$(cat <<EOF
+          ## Deployment Request
+
+          **Deployment Ticket:** ${{ inputs.ticket }}
+
+          **Client:** ${{ inputs.client }}
+
+          **Deployment Target:** ${{ inputs.target }}
+
+          **Release:** ${{ inputs.release }}
+
+          ## Configuration
+
+          \`${{ steps.config.outputs.config_file }}\`
+
+          ## Configuration Change
+
+          Target:
+
+          \`${{ inputs.target }}\`
+
+          Field:
+
+          \`continuous_deploy_tag\`
+
+          Previous release:
+
+          \`${{ steps.update.outputs.old_release }}\`
+
+          New release:
+
+          \`${{ inputs.release }}\`
+
+          ## Branch
+
+          \`${{ inputs.ticket }}\`
+
+          ---
+
+          Created automatically by Deployment PR Bot.
+          EOF
+          )")
+
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------
+      # 14. Final result
+      # ------------------------------------------------------------
+
+      - name: Deployment PR summary
+        shell: bash
         run: |
           echo ""
           echo "================================"
-          echo "DEPLOYMENT PLAN"
+          echo "DEPLOYMENT PR CREATED"
           echo "================================"
-          echo "Ticket:  ${{ inputs.ticket }}"
-          echo "Client:  ${{ inputs.client }}"
-          echo "Target:  ${{ inputs.target }}"
-          echo "Release: ${{ inputs.release }}"
           echo ""
-          echo "Configuration file:"
-          echo "${{ steps.config.outputs.config_file }}"
-          echo ""
-          echo "Current release:"
-          echo "${{ steps.target.outputs.current_release }}"
-          echo ""
-          echo "Requested release:"
-          echo "${{ inputs.release }}"
-          echo ""
-          echo "Planned change:"
-          echo "continuous_deploy_tag: ${{ steps.target.outputs.current_release }} -> ${{ inputs.release }}"
-          echo ""
-          echo "Planned branch:"
+          echo "Ticket:"
           echo "${{ inputs.ticket }}"
           echo ""
-          echo "Planned commit:"
-          echo "${{ inputs.ticket }}: Deploy ${{ inputs.release }} to ${{ inputs.target }} for ${{ inputs.client }}"
+          echo "Client:"
+          echo "${{ inputs.client }}"
           echo ""
-          echo "Planned PR:"
-          echo "${{ inputs.ticket }} - Deploy ${{ inputs.release }} to ${{ inputs.target }} for ${{ inputs.client }}"
+          echo "Target:"
+          echo "${{ inputs.target }}"
+          echo ""
+          echo "Configuration:"
+          echo "${{ steps.config.outputs.config_file }}"
+          echo ""
+          echo "Previous release:"
+          echo "${{ steps.update.outputs.old_release }}"
+          echo ""
+          echo "New release:"
+          echo "${{ inputs.release }}"
+          echo ""
+          echo "Branch:"
+          echo "${{ inputs.ticket }}"
+          echo ""
+          echo "Pull Request:"
+          echo "${{ steps.pr.outputs.pr_url }}"
+          echo ""
           echo "================================"
