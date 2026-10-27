@@ -3,7 +3,7 @@ qa-next: &qa
   cost_result_logging: false
   sqs_api_queue_name: QA_cs_procedure_serp
   sqs_etl_queue_name: QA_cs_provider_match
-  continuous_deploy_tag: next
+  continuous_deploy_tag: 26.5.2
   should_smoke_test: false
   cloud:
     use: true
