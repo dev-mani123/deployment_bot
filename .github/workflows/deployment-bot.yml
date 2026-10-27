@@ -47,12 +47,17 @@ jobs:
           echo "Release: ${{ inputs.release }}"
           echo "================================"
 
+      - name: Show repository files
+        run: |
+          echo "Repository files:"
+          find . -maxdepth 5 -type f | sort
+
       - name: Resolve client configuration
         id: config
         shell: bash
         run: |
-          CLIENT=$(echo "${{ inputs.client }}" | tr '[:upper:]' '[:lower:]')
-          CONFIG_FILE="clients/${CLIENT}/config.yml"
+          CLIENT="${{ inputs.client }}"
+          CONFIG_FILE="platform-client/clients/${CLIENT}/config.yml"
 
           echo "Looking for configuration:"
           echo "$CONFIG_FILE"
@@ -62,7 +67,9 @@ jobs:
             exit 1
           fi
 
-          echo "Configuration found."
+          echo "Configuration found:"
+          echo "$CONFIG_FILE"
+
           echo "config_file=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Read deployment target
@@ -72,6 +79,12 @@ jobs:
           CONFIG_FILE="${{ steps.config.outputs.config_file }}"
           TARGET="${{ inputs.target }}"
 
+          echo "Reading configuration:"
+          echo "$CONFIG_FILE"
+          echo ""
+          echo "Looking for exact target:"
+          echo "$TARGET"
+
           node - "$CONFIG_FILE" "$TARGET" <<'NODE'
           const fs = require("fs");
 
@@ -80,67 +93,124 @@ jobs:
 
           const content = fs.readFileSync(file, "utf8");
 
-          const escapedTarget = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const lines = content.split(/\r?\n/);
 
-          const sectionRegex = new RegExp(
-            "^" + escapedTarget + ":\\s*\\n([\\s\\S]*?)(?=^[A-Za-z0-9_-]+:\\s*(?:&[^\\n]+)?\\s*$|\\Z)",
-            "m"
-          );
+          let targetFound = false;
+          let currentRelease = null;
 
-          const sectionMatch = content.match(sectionRegex);
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
 
-          if (!sectionMatch) {
-            console.error(`Target '${target}' was not found.`);
-            process.exit(1);
+            if (line.trim() === `${target}:`) {
+              targetFound = true;
+
+              const targetIndent = line.length - line.trimStart().length;
+
+              for (let j = i + 1; j < lines.length; j++) {
+                const nextLine = lines[j];
+
+                if (!nextLine.trim()) {
+                  continue;
+                }
+
+                const nextIndent =
+                  nextLine.length - nextLine.trimStart().length;
+
+                if (
+                  nextIndent <= targetIndent &&
+                  /^[A-Za-z0-9_-]+:/.test(nextLine.trim())
+                ) {
+                  break;
+                }
+
+                const match = nextLine.match(
+                  /^\s*continuous_deploy_tag:\s*([^\s#]+)/
+                );
+
+                if (match) {
+                  currentRelease = match[1];
+                  break;
+                }
+              }
+
+              break;
+            }
           }
 
-          const section = sectionMatch[1];
-
-          const tagMatch = section.match(
-            /^\\s+continuous_deploy_tag:\\s*([^\\s#]+).*$/m
-          );
-
-          if (!tagMatch) {
+          if (!targetFound) {
             console.error(
-              `continuous_deploy_tag was not found under '${target}'.`
+              `ERROR: Deployment target '${target}' was not found in ${file}`
             );
             process.exit(1);
           }
 
-          const current = tagMatch[1];
+          if (!currentRelease) {
+            console.error(
+              `ERROR: continuous_deploy_tag was not found under '${target}'`
+            );
+            process.exit(1);
+          }
 
+          console.log("");
           console.log("================================");
           console.log("Configuration validated");
           console.log("================================");
-          console.log(`File:           ${file}`);
-          console.log(`Target:         ${target}`);
-          console.log(`Current release: ${current}`);
+          console.log(`File:            ${file}`);
+          console.log(`Target:          ${target}`);
+          console.log(`Current release: ${currentRelease}`);
           console.log("================================");
 
           fs.appendFileSync(
             process.env.GITHUB_OUTPUT,
-            `current_release=${current}\n`
+            `current_release=${currentRelease}\n`
           );
           NODE
 
+      - name: Validate requested release
+        shell: bash
+        run: |
+          CURRENT="${{ steps.target.outputs.current_release }}"
+          REQUESTED="${{ inputs.release }}"
+
+          echo "Current release:   $CURRENT"
+          echo "Requested release: $REQUESTED"
+
+          if [ "$CURRENT" = "$REQUESTED" ]; then
+            echo "::error::Release $REQUESTED is already configured for ${{ inputs.client }} / ${{ inputs.target }}"
+            exit 1
+          fi
+
+          echo "Release change is required."
+
       - name: Show deployment plan
         run: |
+          echo ""
           echo "================================"
           echo "DEPLOYMENT PLAN"
           echo "================================"
-          echo "Ticket:    ${{ inputs.ticket }}"
-          echo "Client:    ${{ inputs.client }}"
-          echo "Target:    ${{ inputs.target }}"
+          echo "Ticket:  ${{ inputs.ticket }}"
+          echo "Client:  ${{ inputs.client }}"
+          echo "Target:  ${{ inputs.target }}"
+          echo "Release: ${{ inputs.release }}"
           echo ""
-          echo "Config:"
+          echo "Configuration file:"
           echo "${{ steps.config.outputs.config_file }}"
           echo ""
-          echo "Current:"
+          echo "Current release:"
           echo "${{ steps.target.outputs.current_release }}"
           echo ""
-          echo "Requested:"
+          echo "Requested release:"
           echo "${{ inputs.release }}"
           echo ""
           echo "Planned change:"
           echo "continuous_deploy_tag: ${{ steps.target.outputs.current_release }} -> ${{ inputs.release }}"
+          echo ""
+          echo "Planned branch:"
+          echo "${{ inputs.ticket }}"
+          echo ""
+          echo "Planned commit:"
+          echo "${{ inputs.ticket }}: Deploy ${{ inputs.release }} to ${{ inputs.target }} for ${{ inputs.client }}"
+          echo ""
+          echo "Planned PR:"
+          echo "${{ inputs.ticket }} - Deploy ${{ inputs.release }} to ${{ inputs.target }} for ${{ inputs.client }}"
           echo "================================"
