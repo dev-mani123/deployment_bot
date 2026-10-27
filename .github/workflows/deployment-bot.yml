@@ -1,0 +1,48 @@
+name: Deployment PR Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticket:
+        description: "Deployment ticket"
+        required: true
+        type: string
+
+      client:
+        description: "Client name"
+        required: true
+        type: string
+
+      target:
+        description: "Exact deployment target"
+        required: true
+        type: choice
+        options:
+          - uat-stable
+          - uat-preview
+          - production-a
+          - production-b
+
+      release:
+        description: "Release version"
+        required: true
+        type: string
+
+jobs:
+  validate-request:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Display deployment request
+        run: |
+          echo "================================"
+          echo "Deployment PR Bot"
+          echo "================================"
+          echo "Ticket:  ${{ inputs.ticket }}"
+          echo "Client:  ${{ inputs.client }}"
+          echo "Target:  ${{ inputs.target }}"
+          echo "Release: ${{ inputs.release }}"
+          echo "================================"
