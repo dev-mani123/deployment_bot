@@ -36,7 +36,7 @@ qa-stable:
 
 uat-stable: &uat
   <<: *base_defaults
-  continuous_deploy_tag: 26.3.3
+  continuous_deploy_tag: 26.4.1
   cost_result_logging: false
   sqs_api_queue_name: UAT_cs_procedure_serp
   sqs_etl_queue_name: UAT_cs_provider_match
