@@ -45,7 +45,7 @@ uat-stable: &uat
 
 uat-preview:
   <<: *uat
-  continuous_deploy_tag: 26.4.1
+  continuous_deploy_tag: 26.5.2
   cloud:
     use: true
     scheduled_suspend_resume:
