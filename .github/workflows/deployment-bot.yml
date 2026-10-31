@@ -113,11 +113,10 @@ jobs:
           )"
 
           # ------------------------------------------------------
-          # COMMAND TARGET -> ACTUAL YAML TARGET
+          # COMMAND TARGET -> YAML TARGET
           # ------------------------------------------------------
 
           case "$TARGET_NORMALIZED" in
-
             qa_next)
               ACTUAL_TARGET="qa-next"
               ;;
@@ -159,9 +158,9 @@ jobs:
           fi
 
           # ------------------------------------------------------
-          # SAFETY RULE
+          # ALL_CLIENTS SAFETY RULE
           #
-          # ALL_CLIENTS is ONLY allowed for uat_preview.
+          # ALL_CLIENTS can ONLY be used for uat_preview.
           # ------------------------------------------------------
 
           if [ "$ALL_CLIENTS" = "true" ] &&
@@ -198,15 +197,9 @@ jobs:
           echo "================================"
 
       # ==========================================================
-      # 3. CHECK DUPLICATE BRANCH
+      # 3. DUPLICATE BRANCH CHECK
       #
-      # Case-insensitive:
-      #
-      # TEST-101
-      # test-101
-      # Test-101
-      #
-      # are considered the same.
+      # Case-insensitive.
       # ==========================================================
 
       - name: Check duplicate branch
@@ -244,7 +237,7 @@ jobs:
           echo "No duplicate branch found."
 
       # ==========================================================
-      # 4. CHECK DUPLICATE OPEN PR
+      # 4. DUPLICATE OPEN PR CHECK
       # ==========================================================
 
       - name: Check duplicate Pull Request
@@ -290,10 +283,9 @@ jobs:
           echo "No duplicate Pull Request found."
 
       # ==========================================================
-      # 5A. SINGLE CLIENT
+      # 5A. SINGLE CLIENT UPDATE
       #
-      # Dynamically search platform-client/clients
-      # case-insensitively.
+      # Client directory is resolved case-insensitively.
       # ==========================================================
 
       - name: Update single client
@@ -322,8 +314,8 @@ jobs:
             if [[ "${DIRECTORY_NAME,,}" == "${CLIENT_INPUT,,}" ]]; then
 
               MATCH_COUNT=$((MATCH_COUNT + 1))
-
               MATCHED_DIRECTORY="$CLIENT_DIRECTORY"
+
             fi
 
           done < <(
@@ -354,7 +346,6 @@ jobs:
           if [ "$MATCH_COUNT" -gt 1 ]; then
 
             echo "::error::Multiple client directories match '$CLIENT_INPUT' ignoring case."
-
             echo "Refusing to guess."
 
             exit 1
@@ -367,9 +358,7 @@ jobs:
           if [ ! -f "$CONFIG_FILE" ]; then
 
             echo "::error::config.yml not found for '$ACTUAL_CLIENT'."
-
-            echo "Expected:"
-            echo "$CONFIG_FILE"
+            echo "Expected: $CONFIG_FILE"
 
             exit 1
           fi
@@ -382,11 +371,9 @@ jobs:
           echo "Configuration:"
           echo "$CONFIG_FILE"
 
-          node - \
-            "$CONFIG_FILE" \
-            "$TARGET" \
-            "$RELEASE" <<'NODE'
+          UPDATE_SCRIPT="$RUNNER_TEMP/update-single-client.js"
 
+          cat > "$UPDATE_SCRIPT" <<'NODE'
           const fs = require("fs");
 
           const file = process.argv[2];
@@ -396,9 +383,6 @@ jobs:
           const original =
             fs.readFileSync(file, "utf8");
 
-          /*
-           * Preserve CRLF/LF.
-           */
           const lineEnding =
             original.includes("\r\n")
               ? "\r\n"
@@ -424,16 +408,6 @@ jobs:
               "\\$&"
             );
 
-          /*
-           * Supports:
-           *
-           * qa-next: &qa
-           * qa-stable:
-           * uat-stable: &uat
-           * uat-preview:
-           * production-a: &production
-           * production-b:
-           */
           const targetPattern =
             new RegExp(
               `^${escaped}:\\s*(?:&[A-Za-z0-9._-]+)?\\s*$`,
@@ -444,17 +418,9 @@ jobs:
           let tagFound = false;
           let oldRelease = null;
 
-          for (
-            let i = 0;
-            i < lines.length;
-            i++
-          ) {
+          for (let i = 0; i < lines.length; i++) {
 
-            if (
-              !targetPattern.test(
-                lines[i].trim()
-              )
-            ) {
+            if (!targetPattern.test(lines[i].trim())) {
               continue;
             }
 
@@ -464,14 +430,9 @@ jobs:
               lines[i].length -
               lines[i].trimStart().length;
 
-            for (
-              let j = i + 1;
-              j < lines.length;
-              j++
-            ) {
+            for (let j = i + 1; j < lines.length; j++) {
 
-              const nextLine =
-                lines[j];
+              const nextLine = lines[j];
 
               if (!nextLine.trim()) {
                 continue;
@@ -499,24 +460,19 @@ jobs:
                 continue;
               }
 
-              oldRelease =
-                match[2];
+              oldRelease = match[2];
 
               if (
                 oldRelease.toLowerCase() ===
                 release.toLowerCase()
               ) {
-
                 console.error(
-                  `Release '${release}' is already configured for ${target}.`
+                  `Release '${release}' is already configured for '${target}'.`
                 );
 
                 process.exit(2);
               }
 
-              /*
-               * Change ONLY continuous_deploy_tag.
-               */
               lines[j] =
                 `${match[1]}${release}${match[3]}`;
 
@@ -529,7 +485,6 @@ jobs:
           }
 
           if (!targetFound) {
-
             console.error(
               `Target '${target}' was not found.`
             );
@@ -538,7 +493,6 @@ jobs:
           }
 
           if (!tagFound) {
-
             console.error(
               `continuous_deploy_tag was not found under '${target}'.`
             );
@@ -559,27 +513,51 @@ jobs:
             "utf8"
           );
 
-          fs.appendFileSync(
-            process.env.GITHUB_OUTPUT,
-            `old_release=${oldRelease}\n`
-          );
+          console.log(oldRelease);
           NODE
+
+          set +e
+
+          OLD_RELEASE="$(
+            node \
+              "$UPDATE_SCRIPT" \
+              "$CONFIG_FILE" \
+              "$TARGET" \
+              "$RELEASE"
+          )"
+
+          STATUS=$?
+
+          set -e
+
+          if [ "$STATUS" -ne 0 ]; then
+
+            echo "::error::Failed to update $ACTUAL_CLIENT."
+            exit "$STATUS"
+          fi
 
           echo "actual_client=$ACTUAL_CLIENT" >> "$GITHUB_OUTPUT"
           echo "config_file=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
+          echo "old_release=$OLD_RELEASE" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "Updated:"
+          echo "$ACTUAL_CLIENT"
+          echo "$OLD_RELEASE -> $RELEASE"
 
       # ==========================================================
-      # 5B. ALL CLIENTS
+      # 5B. ALL CLIENTS UPDATE
       #
-      # IMPORTANT:
+      # ONLY uat-preview.
       #
-      # This can ONLY execute for uat_preview.
+      # Dynamically discovers all clients.
       #
-      # It dynamically discovers every directory under:
+      # SKIPS:
       #
-      # platform-client/clients/*
-      #
-      # No client list is hardcoded.
+      # - missing config.yml
+      # - missing uat-preview
+      # - missing continuous_deploy_tag
+      # - already on requested release
       # ==========================================================
 
       - name: Update all clients
@@ -590,11 +568,11 @@ jobs:
           RELEASE: ${{ steps.inputs.outputs.release }}
         run: |
           CLIENT_ROOT="platform-client/clients"
-
           TARGET="uat-preview"
 
           UPDATED_FILE="$RUNNER_TEMP/updated-clients.txt"
           SKIPPED_FILE="$RUNNER_TEMP/skipped-clients.txt"
+          UPDATE_SCRIPT="$RUNNER_TEMP/update-client.js"
 
           : > "$UPDATED_FILE"
           : > "$SKIPPED_FILE"
@@ -617,6 +595,171 @@ jobs:
           echo "Release: $RELEASE"
           echo "================================"
 
+          # ------------------------------------------------------
+          # JavaScript helper.
+          #
+          # Created once and executed for every client.
+          #
+          # Exit codes:
+          #
+          # 0  = updated
+          # 10 = target missing
+          # 11 = tag missing
+          # 12 = already configured
+          # ------------------------------------------------------
+
+          cat > "$UPDATE_SCRIPT" <<'NODE'
+          const fs = require("fs");
+
+          const file = process.argv[2];
+          const target = process.argv[3];
+          const release = process.argv[4];
+
+          const original =
+            fs.readFileSync(file, "utf8");
+
+          const lineEnding =
+            original.includes("\r\n")
+              ? "\r\n"
+              : "\n";
+
+          const endedWithNewline =
+            original.endsWith("\n");
+
+          const lines =
+            original.split(/\r?\n/);
+
+          if (
+            endedWithNewline &&
+            lines.length > 0 &&
+            lines[lines.length - 1] === ""
+          ) {
+            lines.pop();
+          }
+
+          const escapedTarget =
+            target.replace(
+              /[.*+?^${}()|[\]\\]/g,
+              "\\$&"
+            );
+
+          const targetPattern =
+            new RegExp(
+              `^${escapedTarget}:\\s*(?:&[A-Za-z0-9._-]+)?\\s*$`,
+              "i"
+            );
+
+          let targetFound = false;
+          let tagFound = false;
+          let oldRelease = null;
+
+          for (let i = 0; i < lines.length; i++) {
+
+            if (
+              !targetPattern.test(
+                lines[i].trim()
+              )
+            ) {
+              continue;
+            }
+
+            targetFound = true;
+
+            const targetIndent =
+              lines[i].length -
+              lines[i].trimStart().length;
+
+            for (let j = i + 1; j < lines.length; j++) {
+
+              const nextLine = lines[j];
+
+              if (!nextLine.trim()) {
+                continue;
+              }
+
+              const nextIndent =
+                nextLine.length -
+                nextLine.trimStart().length;
+
+              if (
+                nextIndent <= targetIndent &&
+                /^[A-Za-z0-9._-]+:/.test(
+                  nextLine.trim()
+                )
+              ) {
+                break;
+              }
+
+              const match =
+                nextLine.match(
+                  /^(\s*continuous_deploy_tag:\s*)([^\s#]+)(.*)$/
+                );
+
+              if (!match) {
+                continue;
+              }
+
+              tagFound = true;
+              oldRelease = match[2];
+
+              if (
+                oldRelease.toLowerCase() ===
+                release.toLowerCase()
+              ) {
+                console.log(
+                  `ALREADY|${oldRelease}`
+                );
+
+                process.exit(12);
+              }
+
+              lines[j] =
+                `${match[1]}${release}${match[3]}`;
+
+              break;
+            }
+
+            break;
+          }
+
+          if (!targetFound) {
+
+            console.log("TARGET_MISSING");
+
+            process.exit(10);
+          }
+
+          if (!tagFound) {
+
+            console.log("TAG_MISSING");
+
+            process.exit(11);
+          }
+
+          let updated =
+            lines.join(lineEnding);
+
+          if (endedWithNewline) {
+            updated += lineEnding;
+          }
+
+          fs.writeFileSync(
+            file,
+            updated,
+            "utf8"
+          );
+
+          console.log(
+            `UPDATED|${oldRelease}`
+          );
+
+          process.exit(0);
+          NODE
+
+          # ------------------------------------------------------
+          # Process every client directory.
+          # ------------------------------------------------------
+
           while IFS= read -r CLIENT_DIRECTORY; do
 
             CLIENT_NAME="$(basename "$CLIENT_DIRECTORY")"
@@ -629,14 +772,16 @@ jobs:
             echo "--------------------------------"
 
             # ----------------------------------------------------
-            # Missing config.yml -> SKIP
+            # Missing config.yml
             # ----------------------------------------------------
 
             if [ ! -f "$CONFIG_FILE" ]; then
 
               echo "SKIPPED: config.yml not found"
 
-              echo "$CLIENT_NAME|config.yml not found" \
+              printf '%s|%s\n' \
+                "$CLIENT_NAME" \
+                "config.yml not found" \
                 >> "$SKIPPED_FILE"
 
               SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
@@ -645,183 +790,17 @@ jobs:
             fi
 
             # ----------------------------------------------------
-            # Process config.
-            #
-            # Exit:
-            #
-            # 0  = updated
-            # 10 = uat-preview missing
-            # 11 = continuous_deploy_tag missing
-            # 12 = release already configured
+            # Run helper.
             # ----------------------------------------------------
 
             set +e
 
             RESULT="$(
-              node - \
+              node \
+                "$UPDATE_SCRIPT" \
                 "$CONFIG_FILE" \
                 "$TARGET" \
-                "$RELEASE" <<'NODE'
-
-            const fs = require("fs");
-
-            const file = process.argv[2];
-            const target = process.argv[3];
-            const release = process.argv[4];
-
-            const original =
-              fs.readFileSync(file, "utf8");
-
-            const lineEnding =
-              original.includes("\r\n")
-                ? "\r\n"
-                : "\n";
-
-            const endedWithNewline =
-              original.endsWith("\n");
-
-            const lines =
-              original.split(/\r?\n/);
-
-            if (
-              endedWithNewline &&
-              lines.length > 0 &&
-              lines[lines.length - 1] === ""
-            ) {
-              lines.pop();
-            }
-
-            const escaped =
-              target.replace(
-                /[.*+?^${}()|[\]\\]/g,
-                "\\$&"
-              );
-
-            const targetPattern =
-              new RegExp(
-                `^${escaped}:\\s*(?:&[A-Za-z0-9._-]+)?\\s*$`,
-                "i"
-              );
-
-            let targetFound = false;
-            let tagFound = false;
-            let oldRelease = null;
-
-            for (
-              let i = 0;
-              i < lines.length;
-              i++
-            ) {
-
-              if (
-                !targetPattern.test(
-                  lines[i].trim()
-                )
-              ) {
-                continue;
-              }
-
-              targetFound = true;
-
-              const targetIndent =
-                lines[i].length -
-                lines[i].trimStart().length;
-
-              for (
-                let j = i + 1;
-                j < lines.length;
-                j++
-              ) {
-
-                const nextLine =
-                  lines[j];
-
-                if (!nextLine.trim()) {
-                  continue;
-                }
-
-                const nextIndent =
-                  nextLine.length -
-                  nextLine.trimStart().length;
-
-                if (
-                  nextIndent <= targetIndent &&
-                  /^[A-Za-z0-9._-]+:/.test(
-                    nextLine.trim()
-                  )
-                ) {
-                  break;
-                }
-
-                const match =
-                  nextLine.match(
-                    /^(\s*continuous_deploy_tag:\s*)([^\s#]+)(.*)$/
-                  );
-
-                if (!match) {
-                  continue;
-                }
-
-                oldRelease =
-                  match[2];
-
-                tagFound = true;
-
-                if (
-                  oldRelease.toLowerCase() ===
-                  release.toLowerCase()
-                ) {
-
-                  console.log(
-                    `ALREADY|${oldRelease}`
-                  );
-
-                  process.exit(12);
-                }
-
-                /*
-                 * Change ONLY tag value.
-                 */
-                lines[j] =
-                  `${match[1]}${release}${match[3]}`;
-
-                break;
-              }
-
-              break;
-            }
-
-            if (!targetFound) {
-
-              console.log("TARGET_MISSING");
-
-              process.exit(10);
-            }
-
-            if (!tagFound) {
-
-              console.log("TAG_MISSING");
-
-              process.exit(11);
-            }
-
-            let updated =
-              lines.join(lineEnding);
-
-            if (endedWithNewline) {
-              updated += lineEnding;
-            }
-
-            fs.writeFileSync(
-              file,
-              updated,
-              "utf8"
-            );
-
-            console.log(
-              `UPDATED|${oldRelease}`
-            );
-            NODE
+                "$RELEASE"
             )"
 
             STATUS=$?
@@ -836,9 +815,14 @@ jobs:
 
               OLD_RELEASE="${RESULT#UPDATED|}"
 
-              echo "UPDATED: $OLD_RELEASE -> $RELEASE"
+              echo "UPDATED"
+              echo "Previous: $OLD_RELEASE"
+              echo "New:      $RELEASE"
 
-              echo "$CLIENT_NAME|$OLD_RELEASE|$RELEASE" \
+              printf '%s|%s|%s\n' \
+                "$CLIENT_NAME" \
+                "$OLD_RELEASE" \
+                "$RELEASE" \
                 >> "$UPDATED_FILE"
 
               UPDATED_COUNT=$((UPDATED_COUNT + 1))
@@ -851,7 +835,9 @@ jobs:
 
               echo "SKIPPED: uat-preview not found"
 
-              echo "$CLIENT_NAME|uat-preview not found" \
+              printf '%s|%s\n' \
+                "$CLIENT_NAME" \
+                "uat-preview not found" \
                 >> "$SKIPPED_FILE"
 
               SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
@@ -864,7 +850,9 @@ jobs:
 
               echo "SKIPPED: continuous_deploy_tag not present"
 
-              echo "$CLIENT_NAME|continuous_deploy_tag not present" \
+              printf '%s|%s\n' \
+                "$CLIENT_NAME" \
+                "continuous_deploy_tag not present" \
                 >> "$SKIPPED_FILE"
 
               SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
@@ -879,14 +867,26 @@ jobs:
 
               echo "SKIPPED: already configured with $OLD_RELEASE"
 
-              echo "$CLIENT_NAME|already configured with $OLD_RELEASE" \
+              printf '%s|%s\n' \
+                "$CLIENT_NAME" \
+                "already configured with $OLD_RELEASE" \
                 >> "$SKIPPED_FILE"
 
               SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
 
+            # ----------------------------------------------------
+            # UNEXPECTED ERROR
+            # ----------------------------------------------------
+
             else
 
               echo "::error::Unexpected error while processing $CLIENT_NAME"
+
+              echo "Output:"
+              echo "$RESULT"
+
+              echo "Exit code:"
+              echo "$STATUS"
 
               exit 1
             fi
@@ -900,19 +900,59 @@ jobs:
               sort -f
           )
 
+          # ------------------------------------------------------
+          # SUMMARY
+          # ------------------------------------------------------
+
           echo ""
           echo "================================"
           echo "ALL CLIENTS RESULT"
           echo "================================"
 
-          echo "Updated clients:"
-          echo "$UPDATED_COUNT"
+          echo "Updated clients: $UPDATED_COUNT"
+          echo "Skipped clients: $SKIPPED_COUNT"
 
           echo ""
-          echo "Skipped clients:"
-          echo "$SKIPPED_COUNT"
+          echo "UPDATED CLIENTS"
+          echo "--------------------------------"
+
+          if [ -s "$UPDATED_FILE" ]; then
+
+            while IFS='|' read -r CLIENT OLD NEW; do
+
+              echo "$CLIENT: $OLD -> $NEW"
+
+            done < "$UPDATED_FILE"
+
+          else
+
+            echo "None"
+
+          fi
+
+          echo ""
+          echo "SKIPPED CLIENTS"
+          echo "--------------------------------"
+
+          if [ -s "$SKIPPED_FILE" ]; then
+
+            while IFS='|' read -r CLIENT REASON; do
+
+              echo "$CLIENT: $REASON"
+
+            done < "$SKIPPED_FILE"
+
+          else
+
+            echo "None"
+
+          fi
 
           echo "================================"
+
+          # ------------------------------------------------------
+          # Require at least one actual update.
+          # ------------------------------------------------------
 
           if [ "$UPDATED_COUNT" -eq 0 ]; then
 
@@ -928,7 +968,7 @@ jobs:
           echo "skipped_file=$SKIPPED_FILE" >> "$GITHUB_OUTPUT"
 
       # ==========================================================
-      # 6A. VERIFY SINGLE CLIENT
+      # 6A. VERIFY SINGLE CLIENT CHANGE
       # ==========================================================
 
       - name: Verify single client change
@@ -939,7 +979,7 @@ jobs:
         run: |
           echo ""
           echo "================================"
-          echo "GIT DIFF"
+          echo "SINGLE CLIENT GIT DIFF"
           echo "================================"
 
           git diff -- "$CONFIG_FILE"
@@ -984,22 +1024,48 @@ jobs:
             exit 1
           fi
 
+          ADDED_TAG_LINES="$(
+            git diff \
+              --unified=0 \
+              -- "$CONFIG_FILE" |
+              grep '^+' |
+              grep -v '^+++' |
+              grep -c 'continuous_deploy_tag:' ||
+              true
+          )"
+
+          REMOVED_TAG_LINES="$(
+            git diff \
+              --unified=0 \
+              -- "$CONFIG_FILE" |
+              grep '^-' |
+              grep -v '^---' |
+              grep -c 'continuous_deploy_tag:' ||
+              true
+          )"
+
+          if [ "$ADDED_TAG_LINES" -ne 1 ] ||
+             [ "$REMOVED_TAG_LINES" -ne 1 ]; then
+
+            echo "::error::A non-continuous_deploy_tag change was detected."
+
+            exit 1
+          fi
+
           echo ""
           echo "Single-client validation successful."
 
       # ==========================================================
       # 6B. VERIFY ALL CLIENT CHANGES
       #
-      # Every changed file MUST:
+      # Every changed file must:
       #
       # platform-client/clients/<client>/config.yml
       #
-      # Every changed file MUST have:
+      # Each changed config must have exactly:
       #
-      # 1 removed line
-      # 1 added line
-      #
-      # Both must be continuous_deploy_tag.
+      # 1 removed continuous_deploy_tag
+      # 1 added continuous_deploy_tag
       # ==========================================================
 
       - name: Verify all client changes
@@ -1096,7 +1162,7 @@ jobs:
           echo "All-client validation successful."
 
       # ==========================================================
-      # 7. CREATE BRANCH
+      # 7. CREATE DEPLOYMENT BRANCH
       # ==========================================================
 
       - name: Create deployment branch
@@ -1117,7 +1183,9 @@ jobs:
         shell: bash
         env:
           TICKET: ${{ steps.inputs.outputs.ticket }}
-          CLIENT: ${{ steps.inputs.outputs.client }}
+          REQUESTED_CLIENT: ${{ steps.inputs.outputs.client }}
+          ACTUAL_CLIENT: ${{ steps.single.outputs.actual_client }}
+          ALL_CLIENTS: ${{ steps.inputs.outputs.all_clients }}
           TARGET: ${{ steps.inputs.outputs.actual_target }}
           RELEASE: ${{ steps.inputs.outputs.release }}
         run: |
@@ -1129,13 +1197,19 @@ jobs:
             user.email \
             "deployment-pr-bot@users.noreply.github.com"
 
+          if [ "$ALL_CLIENTS" = "true" ]; then
+            COMMIT_CLIENT="ALL_CLIENTS"
+          else
+            COMMIT_CLIENT="$ACTUAL_CLIENT"
+          fi
+
           git add platform-client/clients
 
           git commit \
-            -m "$TICKET: Deploy $RELEASE to $TARGET for $CLIENT"
+            -m "$TICKET: Deploy $RELEASE to $TARGET for $COMMIT_CLIENT"
 
       # ==========================================================
-      # 9. PUSH
+      # 9. PUSH BRANCH
       # ==========================================================
 
       - name: Push deployment branch
@@ -1151,7 +1225,7 @@ jobs:
             "$BRANCH"
 
       # ==========================================================
-      # 10A. BUILD SINGLE CLIENT PR BODY
+      # 10A. SINGLE CLIENT PR BODY
       # ==========================================================
 
       - name: Build single client PR body
@@ -1183,13 +1257,13 @@ jobs:
 
           \`$CONFIG_FILE\`
 
-          ## Change
+          ## Configuration Change
 
-          \`continuous_deploy_tag\`
+          **Field:** \`continuous_deploy_tag\`
 
-          **Previous:** $OLD_RELEASE
+          **Previous:** \`$OLD_RELEASE\`
 
-          **New:** $RELEASE
+          **New:** \`$RELEASE\`
 
           ## Branch
 
@@ -1203,7 +1277,7 @@ jobs:
           echo "body_file=$BODY_FILE" >> "$GITHUB_OUTPUT"
 
       # ==========================================================
-      # 10B. BUILD ALL CLIENTS PR BODY
+      # 10B. ALL CLIENTS PR BODY
       # ==========================================================
 
       - name: Build all clients PR body
@@ -1287,7 +1361,7 @@ jobs:
           echo "body_file=$BODY_FILE" >> "$GITHUB_OUTPUT"
 
       # ==========================================================
-      # 11. CREATE PR
+      # 11. CREATE PULL REQUEST
       # ==========================================================
 
       - name: Create Pull Request
@@ -1298,7 +1372,7 @@ jobs:
 
           TICKET: ${{ steps.inputs.outputs.ticket }}
 
-          INPUT_CLIENT: ${{ steps.inputs.outputs.client }}
+          REQUESTED_CLIENT: ${{ steps.inputs.outputs.client }}
 
           ACTUAL_CLIENT: ${{ steps.single.outputs.actual_client }}
 
@@ -1315,13 +1389,11 @@ jobs:
           if [ "$ALL_CLIENTS" = "true" ]; then
 
             PR_CLIENT="ALL_CLIENTS"
-
             BODY_FILE="$ALL_BODY"
 
           else
 
             PR_CLIENT="$ACTUAL_CLIENT"
-
             BODY_FILE="$SINGLE_BODY"
 
           fi
