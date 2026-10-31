@@ -1398,7 +1398,7 @@ jobs:
 
           fi
 
-          PR_TITLE="$TICKET - Deploy $RELEASE to $TARGET for $PR_CLIENT"
+          PR_TITLE="$TICKET - CD tag update $RELEASE to $TARGET for $PR_CLIENT"
 
           PR_URL="$(
             gh pr create \
