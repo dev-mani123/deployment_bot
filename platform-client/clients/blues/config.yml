@@ -1,0 +1,3 @@
+qa-b:
+  <<: *qa
+  admin_host: awsbluesdbqa01b.aws.mdx.med
