@@ -1,0 +1,17 @@
+qa:
+  <<: *default
+
+demo:
+  <<: *default
+
+uat:
+  <<: *default
+
+lnp:
+  <<: *default
+
+staging:
+  <<: *default
+
+production:
+  <<: *default
